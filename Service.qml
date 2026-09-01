@@ -136,17 +136,27 @@ Item {
 
     lastError = ""
     actionStatus = pendingText
-    // --force is a global flag ufw strips ahead of the command (parser.py). It
-    // answers the interactive confirmations — "this may disrupt existing ssh
-    // connections" on enable, and the delete confirmation — which have no tty
-    // to answer them here.
-    actionProcess.command = [pkexecPath, ufwPath, "--force"].concat(args)
+    actionProcess.command = [pkexecPath, ufwPath].concat(args)
     actionProcess.running = true
     return true
   }
 
   function setEnabled(on) {
-    return _runUfw([on ? "enable" : "disable"],
+    // --force only here, and deliberately not on the rule commands.
+    //
+    // `ufw enable` asks "this may disrupt existing ssh connections, proceed?",
+    // and there is no tty to answer it, so enable needs the flag. But ufw 0.36.2
+    // mis-parses --force in front of a rule: frontend.parse_command() inserts
+    // the implicit `rule` keyword by looking at argv[1] and only accounts for
+    // --dry-run, so with --force there argv[1] is the flag, `rule` is never
+    // inserted, and `allow` resolves to the `default` command family instead.
+    // `ufw --force allow 8006/tcp` therefore fails without adding anything —
+    // it authenticates, runs as root, and does nothing.
+    //
+    // The rule commands need no confirmation anyway: only `reset` and `enable`
+    // prompt, and deletion prompts only for `delete NUM`, which this plugin
+    // never uses.
+    return _runUfw(on ? ["--force", "enable"] : ["disable"],
       on ? "Enabling the firewall" : "Disabling the firewall")
   }
 

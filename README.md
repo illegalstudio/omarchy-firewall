@@ -72,6 +72,14 @@ pkexec /usr/bin/ufw --force <command> [args...]
   reconstructed itself — so no code path can skip the check.
 - **No shell anywhere.** Quickshell's `Process` takes an argv array. There is no
   string to quote and nothing to escape.
+- **`--force` only on `enable`.** ufw 0.36.2 mis-parses `--force` in front of a
+  rule: `frontend.parse_command()` inserts the implicit `rule` keyword by
+  looking at `argv[1]` and only accounts for `--dry-run`, so with `--force`
+  there the keyword is never inserted and `allow` resolves to the `default`
+  command family instead of `rule`. `ufw --force allow 8080/tcp` authenticates,
+  runs as root and adds nothing. Only `enable` gets the flag, because only
+  `enable` has a prompt ("this may disrupt existing ssh connections") and no tty
+  to answer it. Rule commands do not prompt at all.
 - **Deletion is by rule specification, never by number.** `ufw status numbered`
   interleaves the v4 and v6 rules and renumbers on every change, so an index
   worked out from the config files can point at a different rule by the time it
@@ -123,21 +131,32 @@ that names what it does.
 - `r` — re-read state
 - `esc` — close, or cancel the rule being typed
 
-**Adding a rule.** Type it the way you would type it at a ufw prompt, minus the
-`ufw`:
+**Adding a rule.** `a`, or the *Add rule* row, replaces the list with a guided
+form. Everything with a fixed set of answers is a row of chips; the only things
+typed are a port number, an optional source address and an optional comment:
 
-```
-allow 8080/tcp
-limit 22/tcp
-allow 60000:61000/udp
-deny out 25/tcp
-allow mosh
-allow in proto tcp from 192.168.1.0/24 to any port 5432
-allow 8080/tcp comment expo metro
-```
+| Row | Choices |
+| --- | --- |
+| Action | allow · deny · reject · limit |
+| Direction | incoming · outgoing |
+| Match | port · range · app profile |
+| Port / Ports / Profile | a number, two numbers, or a profile from `/etc/ufw/applications.d` |
+| Protocol | TCP · UDP · both |
+| Source | anywhere · from… (then an address) |
+| Comment | optional |
 
-The line under the field previews the exact `ufw` command that will run, or says
-what is wrong with what you typed.
+`j`/`k` move between rows, `h`/`l` change the value on the row you are on,
+`enter` edits a text box or presses the button, `esc` goes back.
+
+Under the form sits the exact command that will run — `ufw allow 8080/tcp` —
+or, when the combination is not one ufw accepts, the reason. Two such cases the
+form will tell you about rather than let you find out after typing your
+password: a port range has to name TCP or UDP (ufw cannot write one rule
+covering both for a range), and an application profile cannot be narrowed to a
+single source address (ufw has no syntax joining the two).
+
+`omarchy-shell nahime.firewall add` opens the panel straight into the form, if
+you want it on a keybind.
 
 ## What it shows read-only, and why
 

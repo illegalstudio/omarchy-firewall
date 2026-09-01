@@ -537,6 +537,83 @@ function parseRuleInput(text, appProfiles) {
   return { ok: true, action: action, tokens: walked.tokens, error: "" }
 }
 
+// ------------------------------------------------------------- the guided form
+//
+// Turns the panel's form state into the same shape everything else here speaks:
+// an action plus a token array. The form cannot express a rule ufw would reject
+// for shape reasons, and the few combinations it can express that ufw does not
+// accept are caught here with a sentence rather than sent off to fail after the
+// password has been typed.
+//
+// The result goes through walkSpec like everything else, so the form is not a
+// second way into ufw's argv — it is another producer of tokens for the one
+// checkpoint.
+
+function buildRuleTokens(form, appProfiles) {
+  function fail(message) { return { ok: false, action: "", tokens: null, error: message } }
+
+  var f = form || {}
+  var action = String(f.action || "allow")
+  if (!isAction(action)) return fail("Pick an action")
+
+  var direction = f.direction === "out" ? "out" : "in"
+  var kind = f.kind === "range" || f.kind === "app" ? f.kind : "port"
+  var proto = (f.proto === "tcp" || f.proto === "udp") ? f.proto : "any"
+  var sourceCustom = f.sourceMode === "custom"
+  var comment = String(f.comment || "").trim()
+
+  var portText = ""
+  if (kind === "port") {
+    if (!isPort(String(f.port || ""))) return fail("Port must be between 1 and 65535")
+    portText = String(f.port)
+  } else if (kind === "range") {
+    var lo = String(f.portFrom || "")
+    var hi = String(f.portTo || "")
+    if (!isPort(lo) || !isPort(hi)) return fail("Both ends of the range must be between 1 and 65535")
+    if (parseInt(lo, 10) > parseInt(hi, 10)) return fail("The range starts after it ends")
+    // ufw refuses a port range without a protocol: it cannot write one rule
+    // covering both tcp and udp for a range.
+    if (proto === "any") return fail("A port range needs TCP or UDP, not both")
+    portText = lo + ":" + hi
+  }
+
+  var tokens = []
+
+  if (kind === "app") {
+    var app = String(f.app || "")
+    if (app === "") return fail("Pick an application profile")
+    // ufw has no syntax joining an application profile to a source address.
+    if (sourceCustom) return fail("An app profile cannot be limited to one source")
+    if (direction === "out") tokens.push("out")
+    tokens.push(app)
+  } else if (!sourceCustom) {
+    if (direction === "out") tokens.push("out")
+    tokens.push(proto === "any" ? portText : portText + "/" + proto)
+  } else {
+    var source = String(f.source || "").trim()
+    if (source === "") return fail("Enter a source address, or set Source to Anywhere")
+    if (!isAddress(source)) return fail("Not an address: " + source)
+    tokens.push(direction)
+    if (proto !== "any") tokens.push("proto", proto)
+    tokens.push("from", source, "to", "any", "port", portText)
+  }
+
+  if (comment !== "") {
+    if (!COMMENT_PATTERN.test(comment)) return fail("Comment has unsupported characters")
+    tokens.push("comment", comment)
+  }
+
+  var safe = validateSpecTokens(tokens, appProfiles)
+  if (!safe) return fail("That combination was rejected before it could run")
+
+  return { ok: true, action: action, tokens: safe, error: "" }
+}
+
+function previewCommand(action, tokens) {
+  if (!action || !tokens) return ""
+  return "ufw " + action + " " + tokens.join(" ")
+}
+
 // The last checkpoint before a command is built. Everything privileged goes
 // through here, including the tokens this file reconstructed itself, so no code
 // path can reach ufw with something that was never walked.
@@ -569,6 +646,8 @@ if (typeof module !== "undefined") {
     isAddress: isAddress,
     walkSpec: walkSpec,
     parseRuleInput: parseRuleInput,
-    validateSpecTokens: validateSpecTokens
+    validateSpecTokens: validateSpecTokens,
+    buildRuleTokens: buildRuleTokens,
+    previewCommand: previewCommand
   }
 }
