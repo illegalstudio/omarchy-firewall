@@ -1,0 +1,294 @@
+#!/bin/bash
+#
+# omarchy-firewall — privileged helper for the nahime.firewall Omarchy plugin.
+#
+# This is the only part of the plugin that ever runs as root. It is invoked as
+#
+#     pkexec /usr/local/lib/omarchy-firewall/omarchy-firewall <command> [args...]
+#
+# under the polkit action dev.nahime.firewall.manage, which is pinned by
+# annotation to that exact installed path and declared auth_admin (never
+# auth_admin_keep), so polkit puts up the Omarchy password dialog on every
+# single invocation. Nothing here is ever reachable without that dialog.
+#
+# Two rules govern this file:
+#
+#   1. It must live somewhere only root can write. The plugin directory under
+#      ~/.config is user-writable, so running THIS copy under pkexec would hand
+#      root to anything that can write the user's home. install.sh copies it to
+#      /usr/local/lib/omarchy-firewall/ as root:root 0755, and the plugin will
+#      only ever exec the installed path.
+#
+#   2. Arguments are validated here, as root, and ufw's argv is rebuilt from
+#      the validated pieces. Caller input is never forwarded verbatim and never
+#      reaches a shell. The unprivileged side validates too, for a decent error
+#      message, but that check is a convenience and is not trusted.
+
+set -euo pipefail
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+UFW=/usr/bin/ufw
+readonly UFW
+
+die() {
+  echo "omarchy-firewall: $*" >&2
+  exit 2
+}
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  omarchy-firewall enable
+  omarchy-firewall disable
+  omarchy-firewall reload
+  omarchy-firewall rule   <allow|deny|reject|limit> <spec...>
+  omarchy-firewall delete <allow|deny|reject|limit> <spec...>
+
+Rule spec, one of:
+  <port>[/tcp|/udp]
+  <startport>:<endport>[/tcp|/udp]
+  <ApplicationProfile>
+  [in|out] [proto tcp|udp] [from <addr> [port <p>]] [to <addr> [port <p>]]
+optionally followed by:  comment <text>
+USAGE
+  exit 2
+}
+
+# ------------------------------------------------------------------ validation
+
+is_port() {
+  [[ $1 =~ ^[0-9]{1,5}$ ]] || return 1
+  (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+# A port, or an inclusive range whose ends are ordered. ufw accepts a reversed
+# range and then writes a rule that never matches, which reads as "the port is
+# open" in the panel while nothing is allowed through.
+is_port_spec() {
+  local value=$1
+  if [[ $value == *:* ]]; then
+    local lo=${value%%:*} hi=${value##*:}
+    is_port "$lo" && is_port "$hi" && (( 10#$lo <= 10#$hi ))
+  else
+    is_port "$value"
+  fi
+}
+
+is_proto() {
+  [[ $1 == "tcp" || $1 == "udp" ]]
+}
+
+is_ipv4_addr() {
+  local value=$1
+  local addr=$value
+  local mask=""
+
+  if [[ $value == */* ]]; then
+    addr=${value%%/*}
+    mask=${value##*/}
+    [[ $mask =~ ^[0-9]{1,2}$ ]] || return 1
+    (( 10#$mask <= 32 )) || return 1
+  fi
+
+  local -a parts
+  IFS=. read -ra parts <<<"$addr"
+  (( ${#parts[@]} == 4 )) || return 1
+
+  local part
+  for part in "${parts[@]}"; do
+    [[ $part =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$part <= 255 )) || return 1
+  done
+}
+
+# Deliberately coarse: the shape is checked here only to keep anything that is
+# not an address out of ufw's argv. ufw itself does the authoritative parse and
+# refuses what it cannot use.
+is_ipv6_addr() {
+  local value=$1
+  local addr=$value
+  local mask=""
+
+  if [[ $value == */* ]]; then
+    addr=${value%%/*}
+    mask=${value##*/}
+    [[ $mask =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$mask <= 128 )) || return 1
+  fi
+
+  [[ $addr == *:* ]] || return 1
+  [[ $addr =~ ^[0-9A-Fa-f:.]+$ ]]
+}
+
+is_addr() {
+  [[ $1 == "any" ]] && return 0
+  is_ipv4_addr "$1" && return 0
+  is_ipv6_addr "$1"
+}
+
+# ufw application profiles come from /etc/ufw/applications.d. The name has to be
+# checked against the real list rather than a pattern: a profile name is a free
+# text INI section, and an unknown one would otherwise be forwarded to ufw as a
+# rule spec it might read as something else entirely.
+is_app_profile() {
+  local candidate=$1 line
+  [[ $candidate =~ ^[A-Za-z0-9][A-Za-z0-9\ ._+-]{0,63}$ ]] || return 1
+  while IFS= read -r line; do
+    [[ $line == "$candidate" ]] && return 0
+  done < <("$UFW" app list 2>/dev/null | tail -n +2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  return 1
+}
+
+# The comment is written into /etc/ufw/user.rules hex-encoded by ufw, so it
+# cannot break that file's syntax. Restrict it anyway: it is displayed back in
+# the panel, and a control character or newline there is nothing but trouble.
+is_comment() {
+  [[ $1 =~ ^[A-Za-z0-9\ ._:@/+()-]{1,120}$ ]]
+}
+
+# ---------------------------------------------------------------- spec parsing
+#
+# Walks the caller's tokens and appends only recognised, validated ones to SPEC.
+# Anything unexpected aborts. SPEC — not the caller's array — is what reaches
+# ufw.
+
+SPEC=()
+
+parse_spec() {
+  local -a toks=("$@")
+  local n=${#toks[@]} i=0
+  SPEC=()
+
+  (( n > 0 )) || die "empty rule"
+
+  peek() { (( i < n )) && printf '%s' "${toks[i]}"; }
+
+  # optional leading direction
+  case "$(peek)" in
+    in | out)
+      SPEC+=("${toks[i]}")
+      (( ++i ))
+      ;;
+  esac
+
+  (( i < n )) || die "incomplete rule"
+
+  case "$(peek)" in
+    proto | from | to)
+      # extended form
+      if [[ $(peek) == "proto" ]]; then
+        (( ++i ))
+        (( i < n )) || die "proto without a value"
+        is_proto "${toks[i]}" || die "invalid protocol: ${toks[i]}"
+        SPEC+=(proto "${toks[i]}")
+        (( ++i ))
+      fi
+
+      local keyword
+      local endpoints=0
+      for keyword in from to; do
+        if [[ $(peek) == "$keyword" ]]; then
+          (( ++i ))
+          (( i < n )) || die "$keyword without an address"
+          is_addr "${toks[i]}" || die "invalid address: ${toks[i]}"
+          SPEC+=("$keyword" "${toks[i]}")
+          (( ++i ))
+          if [[ $(peek) == "port" ]]; then
+            (( ++i ))
+            (( i < n )) || die "port without a value"
+            is_port_spec "${toks[i]}" || die "invalid port: ${toks[i]}"
+            SPEC+=(port "${toks[i]}")
+            (( ++i ))
+          fi
+          endpoints=1
+        fi
+      done
+      # "proto tcp" on its own names no endpoint. ufw rejects it too, but it
+      # rejects it as a syntax error after the password prompt has already been
+      # answered; catching it here keeps the prompt for rules that can be added.
+      (( endpoints == 1 )) || die "rule needs a 'from' or a 'to' address"
+      ;;
+    *)
+      # simple form: a port (optionally with protocol) or an application profile
+      local token=${toks[i]}
+      if [[ $token =~ ^([0-9]+(:[0-9]+)?)(/(tcp|udp))?$ ]]; then
+        is_port_spec "${BASH_REMATCH[1]}" || die "invalid port: $token"
+      else
+        is_app_profile "$token" || die "unknown application profile: $token"
+      fi
+      SPEC+=("$token")
+      (( ++i ))
+      ;;
+  esac
+
+  if [[ $(peek) == "comment" ]]; then
+    (( ++i ))
+    (( i < n )) || die "comment without text"
+    is_comment "${toks[i]}" || die "invalid comment"
+    SPEC+=(comment "${toks[i]}")
+    (( ++i ))
+  fi
+
+  (( i == n )) || die "unexpected token: ${toks[i]}"
+  (( ${#SPEC[@]} > 0 )) || die "empty rule"
+}
+
+require_action() {
+  case "$1" in
+    allow | deny | reject | limit) ;;
+    *) die "invalid action: $1" ;;
+  esac
+}
+
+# ------------------------------------------------------------------------ main
+
+(( EUID == 0 )) || die "must run as root (invoke it through pkexec, never directly)"
+[[ -x $UFW ]] || die "ufw is not installed at $UFW"
+
+(( $# > 0 )) || usage
+command=$1
+shift
+
+case "$command" in
+  enable)
+    (( $# == 0 )) || usage
+    # --force skips ufw's interactive "may disrupt existing ssh connections"
+    # prompt, which has no tty to answer it here.
+    exec "$UFW" --force enable
+    ;;
+  disable)
+    (( $# == 0 )) || usage
+    exec "$UFW" disable
+    ;;
+  reload)
+    (( $# == 0 )) || usage
+    exec "$UFW" reload
+    ;;
+  rule)
+    (( $# >= 2 )) || usage
+    action=$1
+    shift
+    require_action "$action"
+    parse_spec "$@"
+    exec "$UFW" --force "$action" "${SPEC[@]}"
+    ;;
+  delete)
+    (( $# >= 2 )) || usage
+    action=$1
+    shift
+    require_action "$action"
+    parse_spec "$@"
+    # Deleted by specification, never by the numbers from `ufw status numbered`:
+    # those interleave the v4 and v6 rules and renumber on every change, so an
+    # index computed anywhere but inside this one elevated call can silently
+    # delete the wrong rule — which, for a firewall, means opening a port.
+    # ufw's own matcher tolerates a differing comment, so the comment is not
+    # part of what we send.
+    exec "$UFW" --force delete "$action" "${SPEC[@]}"
+    ;;
+  *)
+    usage
+    ;;
+esac

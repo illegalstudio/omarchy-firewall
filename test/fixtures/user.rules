@@ -1,0 +1,61 @@
+*filter
+:ufw-user-input - [0:0]
+:ufw-user-output - [0:0]
+:ufw-user-forward - [0:0]
+:ufw-before-logging-input - [0:0]
+:ufw-before-logging-output - [0:0]
+:ufw-before-logging-forward - [0:0]
+:ufw-user-logging-input - [0:0]
+:ufw-user-logging-output - [0:0]
+:ufw-user-logging-forward - [0:0]
+:ufw-after-logging-input - [0:0]
+:ufw-after-logging-output - [0:0]
+:ufw-after-logging-forward - [0:0]
+:ufw-logging-deny - [0:0]
+:ufw-logging-allow - [0:0]
+:ufw-user-limit - [0:0]
+:ufw-user-limit-accept - [0:0]
+### RULES ###
+
+### tuple ### allow udp 53317 0.0.0.0/0 any 0.0.0.0/0 in
+-A ufw-user-input -p udp --dport 53317 -j ACCEPT
+
+### tuple ### allow tcp 53317 0.0.0.0/0 any 0.0.0.0/0 in
+-A ufw-user-input -p tcp --dport 53317 -j ACCEPT
+
+### tuple ### allow udp 53 172.17.0.1 any 172.16.0.0/12 in comment=616c6c6f772d646f636b65722d646e73
+-A ufw-user-input -p udp -d 172.17.0.1 --dport 53 -s 172.16.0.0/12 -j ACCEPT
+
+### tuple ### allow udp 53 172.17.0.1 any 192.168.0.0/16 in comment=616c6c6f772d646f636b65722d646e73
+-A ufw-user-input -p udp -d 172.17.0.1 --dport 53 -s 192.168.0.0/16 -j ACCEPT
+
+### tuple ### limit tcp 22 0.0.0.0/0 any 0.0.0.0/0 in comment=6f6d61726368792d73736864
+-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set
+-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 -j ufw-user-limit
+-A ufw-user-input -p tcp --dport 22 -j ufw-user-limit-accept
+
+### tuple ### allow udp 60000:61000 0.0.0.0/0 any 0.0.0.0/0 in
+-A ufw-user-input -p udp -m multiport --dports 60000:61000 -j ACCEPT
+
+### tuple ### allow tcp 8081 0.0.0.0/0 any 0.0.0.0/0 in comment=6578706f206d6574726f
+-A ufw-user-input -p tcp --dport 8081 -j ACCEPT
+
+### tuple ### allow tcp 8001 0.0.0.0/0 any 0.0.0.0/0 in comment=6c61726176656c206172746973616e
+-A ufw-user-input -p tcp --dport 8001 -j ACCEPT
+
+### END RULES ###
+
+### LOGGING ###
+-A ufw-after-logging-input -j LOG --log-prefix "[UFW BLOCK] " -m limit --limit 3/min --limit-burst 10
+-A ufw-after-logging-forward -j LOG --log-prefix "[UFW BLOCK] " -m limit --limit 3/min --limit-burst 10
+-I ufw-logging-deny -m conntrack --ctstate INVALID -j RETURN -m limit --limit 3/min --limit-burst 10
+-A ufw-logging-deny -j LOG --log-prefix "[UFW BLOCK] " -m limit --limit 3/min --limit-burst 10
+-A ufw-logging-allow -j LOG --log-prefix "[UFW ALLOW] " -m limit --limit 3/min --limit-burst 10
+### END LOGGING ###
+
+### RATE LIMITING ###
+-A ufw-user-limit -m limit --limit 3/minute -j LOG --log-prefix "[UFW LIMIT BLOCK] "
+-A ufw-user-limit -j REJECT
+-A ufw-user-limit-accept -j ACCEPT
+### END RATE LIMITING ###
+COMMIT

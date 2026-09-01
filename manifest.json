@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "nahime.firewall",
+  "name": "Firewall",
+  "version": "1.0.0",
+  "author": "nahime",
+  "license": "MIT",
+  "description": "ufw status and rules in the Omarchy bar. Reads unprivileged; every change goes through the Omarchy password prompt.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Firewall",
+    "description": "Show ufw status, browse the rules, and add or delete them. Each change asks for your password.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30
+      }
+    ]
+  }
+}
