@@ -4,7 +4,7 @@ A bar widget for ufw: status at a glance, the rule list in a keyboard-driven
 panel, and add / delete / enable / disable — with the Omarchy password dialog in
 front of every change.
 
-Plugin id `nahime.firewall`, kind `bar-widget`, built against the Omarchy 4.x
+Plugin id `illegalstudio.omarchy-firewall`, kind `bar-widget`, built against the Omarchy 4.x
 shell plugin contract.
 
 ## Security model
@@ -101,8 +101,8 @@ if it is ever installed carelessly. The trade is deliberate.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/nahime/omarchy-firewall.git
-omarchy plugin enable nahime.firewall --section right
+omarchy plugin add https://github.com/illegalstudio/omarchy-firewall.git
+omarchy plugin enable illegalstudio.omarchy-firewall --section right
 ```
 
 That is all of it. There is no privileged setup step: the widget reads
@@ -155,7 +155,7 @@ password: a port range has to name TCP or UDP (ufw cannot write one rule
 covering both for a range), and an application profile cannot be narrowed to a
 single source address (ufw has no syntax joining the two).
 
-`omarchy-shell nahime.firewall add` opens the panel straight into the form, if
+`omarchy-shell illegalstudio.omarchy-firewall add` opens the panel straight into the form, if
 you want it on a keybind.
 
 ## What it shows read-only, and why

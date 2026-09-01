@@ -20,8 +20,8 @@ import "Model.js" as Model
 // guess.
 Panel {
   id: root
-  moduleName: "nahime.firewall"
-  ipcTarget: "nahime.firewall"
+  moduleName: "illegalstudio.omarchy-firewall"
+  ipcTarget: "illegalstudio.omarchy-firewall"
   manageIpc: false
 
   // list | add
