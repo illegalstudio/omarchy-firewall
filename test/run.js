@@ -205,6 +205,46 @@ rejects("allow 22 extra")
 rejects("allow 22 comment")
 rejects("allow 22 comment bad;id")
 
+// --------------------------------------------- the last checkpoint before ufw
+//
+// Every privileged call re-walks its tokens immediately before the command is
+// built, including the ones this file reconstructed itself. These cover that
+// second pass, because it is the only thing standing between a rule row and
+// ufw's argv.
+
+checkTrue("every deletable row survives revalidation", rows.every(function (row) {
+  return Model.validateSpecTokens(row.specTokens, profiles,
+    { allowUnlistedProfile: true }) !== null
+}))
+
+checkTrue("revalidation returns a rebuilt array, not the caller's", rows.every(function (row) {
+  if (!row.deletable) return true
+  var safe = Model.validateSpecTokens(row.specTokens, profiles, { allowUnlistedProfile: true })
+  return safe !== row.specTokens && JSON.stringify(safe) === JSON.stringify(row.specTokens)
+}))
+
+check("revalidation rejects an injected flag",
+  Model.validateSpecTokens(["--force", "reset"], profiles), null)
+check("revalidation rejects a shell fragment",
+  Model.validateSpecTokens(["22; rm -rf /"], profiles), null)
+check("revalidation rejects an unwalked trailing token",
+  Model.validateSpecTokens(["22", "reset"], profiles), null)
+check("revalidation rejects an unknown profile by default",
+  Model.validateSpecTokens(["Gone Profile"], profiles), null)
+check("revalidation allows a profile-shaped name when asked",
+  Model.validateSpecTokens(["Gone Profile"], profiles, { allowUnlistedProfile: true }),
+  ["Gone Profile"])
+check("revalidation still rejects a bad name even when unlisted names are allowed",
+  Model.validateSpecTokens(["Gone; Profile"], profiles, { allowUnlistedProfile: true }), null)
+
+check("actions are the four ufw verbs",
+  ["allow", "deny", "reject", "limit", "reset", "", "ALLOW"].map(Model.isAction),
+  [true, true, true, true, false, false, false])
+
+// A profile name with a space survives being typed as separate words.
+accepts("allow Web Server", "allow", ["Web Server"])
+accepts("allow Web Server comment lab box", "allow", ["Web Server", "comment", "lab box"])
+
 // ------------------------------------------------------------------- reporting
 
 if (process.argv.indexOf("--show") !== -1) {

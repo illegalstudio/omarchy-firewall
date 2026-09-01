@@ -360,12 +360,26 @@ function parseAppProfiles(text) {
 
 var ACTIONS = { allow: true, deny: true, reject: true, limit: true }
 
+// An application profile name as ufw itself allows it: a free-text INI section
+// in /etc/ufw/applications.d. The pattern is what keeps anything that is not a
+// profile name out of ufw's argv; membership in the live list is checked on top
+// of it when the list is available.
+var PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}$/
+var COMMENT_PATTERN = /^[A-Za-z0-9 ._:@/+()-]{1,120}$/
+
+function isAction(action) {
+  return ACTIONS[String(action)] === true
+}
+
 function isPort(value) {
   if (!/^[0-9]{1,5}$/.test(value)) return false
   var n = parseInt(value, 10)
   return n >= 1 && n <= 65535
 }
 
+// A port, or an inclusive range whose ends are ordered. ufw accepts a reversed
+// range and writes a rule that never matches, which reads in the panel as "the
+// port is open" while nothing is getting through.
 function isPortSpec(value) {
   if (value.indexOf(":") !== -1) {
     var parts = value.split(":")
@@ -400,74 +414,135 @@ function isAddress(value) {
   return true
 }
 
-function parseRuleInput(text, appProfiles) {
-  var trimmed = String(text || "").trim()
-  if (trimmed === "") return { ok: false, error: "" }
+// ------------------------------------------------------------ the spec walker
+//
+// The one place a rule specification is checked, used by both the text the user
+// types and the tokens reconstructed from /etc/ufw for a deletion.
+//
+// It does not filter a string: it walks the tokens, recognises each one, and
+// returns a NEW array built from what it recognised. What reaches ufw is that
+// array, never the caller's, so a token the walker does not understand cannot
+// reach the command line by being passed through untouched. No shell is
+// involved anywhere on the path either — the command is handed to the process
+// as an argv array.
+//
+// options.allowUnlistedProfile accepts a profile-shaped token that is not in
+// the live profile list. Deletions need it: a rule can outlive the
+// /etc/ufw/applications.d file that named it, and refusing to delete it then
+// would strand it in the panel. The name still has to match PROFILE_PATTERN.
 
-  var tokens = trimmed.split(/\s+/)
-  var action = tokens[0].toLowerCase()
-  if (ACTIONS[action] !== true) {
-    return { ok: false, error: "Start with allow, deny, reject or limit" }
-  }
-
-  var spec = tokens.slice(1)
-  if (spec.length === 0) return { ok: false, error: "Add a port, a range or an app profile" }
-
+function walkSpec(spec, appProfiles, options) {
+  var tokens = spec || []
+  var profiles = appProfiles || []
+  var allowUnlisted = !!(options && options.allowUnlistedProfile)
+  var n = tokens.length
   var i = 0
   var out = []
 
-  if (spec[i] === "in" || spec[i] === "out") out.push(spec[i++])
-  if (i >= spec.length) return { ok: false, error: "Incomplete rule" }
+  function fail(message) { return { ok: false, tokens: null, error: message } }
 
-  if (spec[i] === "proto" || spec[i] === "from" || spec[i] === "to") {
-    if (spec[i] === "proto") {
+  if (n === 0) return fail("Add a port, a range or an app profile")
+
+  if (tokens[i] === "in" || tokens[i] === "out") out.push(tokens[i++])
+  if (i >= n) return fail("Incomplete rule")
+
+  if (tokens[i] === "proto" || tokens[i] === "from" || tokens[i] === "to") {
+    if (tokens[i] === "proto") {
       i++
-      if (i >= spec.length) return { ok: false, error: "proto needs tcp or udp" }
-      if (spec[i] !== "tcp" && spec[i] !== "udp") return { ok: false, error: "Protocol must be tcp or udp" }
-      out.push("proto", spec[i++])
+      if (i >= n) return fail("proto needs tcp or udp")
+      if (tokens[i] !== "tcp" && tokens[i] !== "udp") return fail("Protocol must be tcp or udp")
+      out.push("proto", tokens[i++])
     }
+
     var endpoints = 0
     var keywords = ["from", "to"]
     for (var k = 0; k < keywords.length; k++) {
-      if (i < spec.length && spec[i] === keywords[k]) {
+      if (i < n && tokens[i] === keywords[k]) {
         i++
-        if (i >= spec.length) return { ok: false, error: keywords[k] + " needs an address" }
-        if (!isAddress(spec[i])) return { ok: false, error: "Not an address: " + spec[i] }
-        out.push(keywords[k], spec[i++])
-        if (i < spec.length && spec[i] === "port") {
+        if (i >= n) return fail(keywords[k] + " needs an address")
+        if (!isAddress(tokens[i])) return fail("Not an address: " + tokens[i])
+        out.push(keywords[k], tokens[i++])
+        if (i < n && tokens[i] === "port") {
           i++
-          if (i >= spec.length) return { ok: false, error: "port needs a value" }
-          if (!isPortSpec(spec[i])) return { ok: false, error: "Not a port: " + spec[i] }
-          out.push("port", spec[i++])
+          if (i >= n) return fail("port needs a value")
+          if (!isPortSpec(tokens[i])) return fail("Not a port: " + tokens[i])
+          out.push("port", tokens[i++])
         }
         endpoints = 1
       }
     }
-    if (endpoints === 0) return { ok: false, error: "Add a from or to address" }
+    // "proto tcp" on its own names no endpoint. ufw rejects it too, but only
+    // after the password has been typed; catching it here keeps the prompt for
+    // rules that can actually be added.
+    if (endpoints === 0) return fail("Add a from or to address")
   } else {
-    var token = spec[i]
-    var portMatch = token.match(/^([0-9]+(?::[0-9]+)?)(?:\/(tcp|udp))?$/)
+    // Simple form: a port, optionally with a protocol, or an application
+    // profile. Profile names can contain spaces ("Web Server"), so the longest
+    // run of tokens before an explicit `comment` is tried first and shortened
+    // until one matches.
+    var portMatch = String(tokens[i]).match(/^([0-9]+(?::[0-9]+)?)(?:\/(tcp|udp))?$/)
     if (portMatch) {
-      if (!isPortSpec(portMatch[1])) return { ok: false, error: "Not a port: " + portMatch[1] }
-    } else if (!appProfiles || appProfiles.indexOf(token) === -1) {
-      return { ok: false, error: "Not a port or a known app profile: " + token }
+      if (!isPortSpec(portMatch[1])) return fail("Not a port: " + portMatch[1])
+      out.push(tokens[i++])
+    } else {
+      var limit = n
+      for (var c = i; c < n; c++) {
+        if (tokens[c] === "comment") { limit = c; break }
+      }
+      var matched = -1
+      for (var end = limit; end > i; end--) {
+        var candidate = tokens.slice(i, end).join(" ")
+        if (!PROFILE_PATTERN.test(candidate)) continue
+        if (profiles.indexOf(candidate) !== -1 || (allowUnlisted && end === limit)) {
+          matched = end
+          out.push(candidate)
+          break
+        }
+      }
+      if (matched === -1) return fail("Not a port or a known app profile: " + tokens[i])
+      i = matched
     }
-    out.push(token)
-    i++
   }
 
-  if (i < spec.length && spec[i] === "comment") {
+  if (i < n && tokens[i] === "comment") {
     i++
-    var rest = spec.slice(i).join(" ")
-    if (rest === "") return { ok: false, error: "comment needs text" }
-    if (!/^[A-Za-z0-9 ._:@/+()-]{1,120}$/.test(rest)) return { ok: false, error: "Comment has unsupported characters" }
+    var rest = tokens.slice(i).join(" ")
+    if (rest === "") return fail("comment needs text")
+    // ufw hex-encodes the comment into user.rules so it cannot break that
+    // file's syntax, but it is also displayed back in the panel, where a
+    // control character has no business being.
+    if (!COMMENT_PATTERN.test(rest)) return fail("Comment has unsupported characters")
     out.push("comment", rest)
-    i = spec.length
+    i = n
   }
 
-  if (i !== spec.length) return { ok: false, error: "Unexpected: " + spec.slice(i).join(" ") }
+  if (i !== n) return fail("Unexpected: " + tokens.slice(i).join(" "))
 
-  return { ok: true, action: action, tokens: out, error: "" }
+  return { ok: true, tokens: out, error: "" }
+}
+
+// What the user types in the panel, as one line minus the leading `ufw`.
+function parseRuleInput(text, appProfiles) {
+  var trimmed = String(text || "").trim()
+  if (trimmed === "") return { ok: false, action: "", tokens: null, error: "" }
+
+  var tokens = trimmed.split(/\s+/)
+  var action = tokens[0].toLowerCase()
+  if (!isAction(action)) {
+    return { ok: false, action: "", tokens: null, error: "Start with allow, deny, reject or limit" }
+  }
+
+  var walked = walkSpec(tokens.slice(1), appProfiles)
+  if (!walked.ok) return { ok: false, action: "", tokens: null, error: walked.error }
+  return { ok: true, action: action, tokens: walked.tokens, error: "" }
+}
+
+// The last checkpoint before a command is built. Everything privileged goes
+// through here, including the tokens this file reconstructed itself, so no code
+// path can reach ufw with something that was never walked.
+function validateSpecTokens(tokens, appProfiles, options) {
+  var walked = walkSpec(tokens, appProfiles, options)
+  return walked.ok ? walked.tokens : null
 }
 
 if (typeof module !== "undefined") {
@@ -489,6 +564,11 @@ if (typeof module !== "undefined") {
     isManagedComment: isManagedComment,
     ruleSummary: ruleSummary,
     parseAppProfiles: parseAppProfiles,
-    parseRuleInput: parseRuleInput
+    isAction: isAction,
+    isPortSpec: isPortSpec,
+    isAddress: isAddress,
+    walkSpec: walkSpec,
+    parseRuleInput: parseRuleInput,
+    validateSpecTokens: validateSpecTokens
   }
 }

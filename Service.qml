@@ -14,20 +14,31 @@ import "Model.js" as Model
 //            correct within a moment of any change, including one made from a
 //            terminal, and never asks for anything.
 //
-//   Writing  goes through exactly one path: pkexec on the root-owned helper at
-//            HELPER_PATH, under the polkit action dev.nahime.firewall.manage.
-//            Polkit raises Omarchy's own password dialog on every single call
-//            (auth_admin, never auth_admin_keep), so no firewall change can
-//            happen without the user authenticating for that specific change.
+//   Writing  goes through exactly one function, _runUfw, which runs
+//            `pkexec /usr/bin/ufw ...`. pkexec hands authentication to polkit,
+//            polkit to the agent running inside omarchy-shell (omarchy.polkit),
+//            so the password dialog is Omarchy's own. The action pkexec falls
+//            under, org.freedesktop.policykit.exec, is auth_admin rather than
+//            auth_admin_keep, so nothing is cached: enabling, disabling, adding
+//            a rule and deleting one each raise the dialog on their own.
 //
-// There is no third path. If the helper is not installed, `canManage` is false
-// and the panel is read-only — the copy of the helper inside this plugin
-// directory is user-writable and is never run as root.
+// The program that runs as root is /usr/bin/ufw itself — root-owned, shipped by
+// the distribution, nothing to install. An earlier draft put a helper script in
+// this plugin directory and ran that under pkexec; that would have meant
+// anything able to write the user's home getting root the next time a firewall
+// change was authorised, which is the same shape as the NOPASSWD grants
+// Omarchy's migration 1788025225 exists to delete. ufw's own binary has no such
+// problem, and needs no setup step.
+//
+// Arguments never reach a shell: Process takes an argv array, and every element
+// of it is rebuilt by Model.walkSpec from tokens it recognised, rather than
+// being passed through from the caller.
+
 Item {
   id: root
 
-  readonly property string helperPath: "/usr/local/lib/omarchy-firewall/omarchy-firewall"
-  readonly property string policyPath: "/usr/share/polkit-1/actions/dev.nahime.firewall.policy"
+  readonly property string pkexecPath: "/usr/bin/pkexec"
+  readonly property string ufwPath: "/usr/bin/ufw"
 
   property var settings: ({})
 
@@ -41,10 +52,9 @@ Item {
   property var appProfiles: []
   property bool loaded: false
 
-  // ---- privileged half
-  property bool helperInstalled: false
-  property bool policyInstalled: false
-  readonly property bool canManage: installed && helperInstalled && policyInstalled
+  // Nothing to install: if ufw is here, changes can be made, and each one asks
+  // for the password when it is made.
+  readonly property bool canManage: installed
 
   // ---- action state
   property string actionStatus: ""
@@ -97,8 +107,6 @@ Item {
     defaultsFile.reload()
     rules4File.reload()
     rules6File.reload()
-    helperFile.reload()
-    policyFile.reload()
     if (!unitProcess.running) unitProcess.running = true
     if (!profilesProcess.running) profilesProcess.running = true
   }
@@ -106,36 +114,39 @@ Item {
   // ------------------------------------------------------------------ writing
 
   function _describeFailure(exitCode, stderrText, stdoutText) {
-    // pkexec's own exit codes, which are not the helper's: 126 covers both
-    // "the dialog was dismissed" and "authentication failed", 127 means it
-    // could not start the program at all.
+    // pkexec's own exit codes, which are not ufw's: 126 covers both "the dialog
+    // was dismissed" and "authentication failed", 127 means it could not start
+    // the program at all.
     if (exitCode === 126) return "Cancelled at the password prompt"
-    if (exitCode === 127) return "Could not start the privileged helper"
+    if (exitCode === 127) return "Could not start ufw"
     var text = String(stderrText || stdoutText || "").replace(/\s+/g, " ").trim()
     if (text === "") return "The firewall command failed"
     return text.length > 160 ? text.substring(0, 157) + "..." : text
   }
 
-  // The single door to root. Everything privileged goes through here, and it
-  // does nothing at all unless the root-owned helper is installed.
-  function _runPrivileged(args, pendingText) {
-    if (!canManage) {
-      lastError = helperInstalled
-        ? "The polkit action is missing. Re-run install.sh as root."
-        : "Firewall changes need the privileged helper. Run install.sh as root."
+  // The single door to root. Every privileged action in this plugin is one call
+  // to this function, and the polkit dialog stands in front of every one of
+  // them. `args` is an argv array; no shell ever sees it.
+  function _runUfw(args, pendingText) {
+    if (!installed) {
+      lastError = "ufw is not installed."
       return false
     }
     if (actionProcess.running) return false
 
     lastError = ""
     actionStatus = pendingText
-    actionProcess.command = ["/usr/bin/pkexec", helperPath].concat(args)
+    // --force is a global flag ufw strips ahead of the command (parser.py). It
+    // answers the interactive confirmations — "this may disrupt existing ssh
+    // connections" on enable, and the delete confirmation — which have no tty
+    // to answer them here.
+    actionProcess.command = [pkexecPath, ufwPath, "--force"].concat(args)
     actionProcess.running = true
     return true
   }
 
   function setEnabled(on) {
-    return _runPrivileged([on ? "enable" : "disable"],
+    return _runUfw([on ? "enable" : "disable"],
       on ? "Enabling the firewall" : "Disabling the firewall")
   }
 
@@ -144,18 +155,45 @@ Item {
   }
 
   function reloadFirewall() {
-    return _runPrivileged(["reload"], "Reloading the firewall")
+    return _runUfw(["reload"], "Reloading the firewall")
   }
 
+  // Both of the rule paths re-walk their tokens here, immediately before the
+  // command is built, even though the panel already validated what was typed
+  // and the delete tokens were reconstructed by this plugin's own parser. It is
+  // the same check twice on purpose: it means no code path anywhere can put a
+  // token into ufw's argv that Model.walkSpec did not recognise.
   function addRule(action, tokens) {
-    if (!action || !tokens || tokens.length === 0) return false
-    return _runPrivileged(["rule", action].concat(tokens), "Adding the rule")
+    if (!Model.isAction(action)) {
+      lastError = "Unknown action: " + action
+      return false
+    }
+    var safe = Model.validateSpecTokens(tokens, appProfiles)
+    if (!safe) {
+      lastError = "That rule was rejected before it could run."
+      return false
+    }
+    return _runUfw([String(action)].concat(safe), "Adding the rule")
   }
 
   function deleteRow(row) {
     if (!row || !row.deletable || !row.specTokens) return false
-    return _runPrivileged(["delete", String(row.action)].concat(row.specTokens),
-      "Deleting the rule")
+    if (!Model.isAction(row.action)) return false
+    // allowUnlistedProfile: a rule can outlive the /etc/ufw/applications.d file
+    // that named its profile, and refusing to delete it then would strand it in
+    // the panel with no way out. The name still has to look like a profile name.
+    var safe = Model.validateSpecTokens(row.specTokens, appProfiles,
+      { allowUnlistedProfile: true })
+    if (!safe) {
+      lastError = "This rule cannot be expressed as a single ufw command."
+      return false
+    }
+    // Deleted by specification, never by the numbers `ufw status numbered`
+    // prints: those interleave the v4 and v6 rules and renumber on every
+    // change, so an index worked out from the config files can point at a
+    // different rule by the time it is used. ufw does the matching, and its own
+    // matcher tolerates a differing comment, so the comment is not sent.
+    return _runUfw(["delete", String(row.action)].concat(safe), "Deleting the rule")
   }
 
   // ---------------------------------------------------------------- watchers
@@ -200,28 +238,6 @@ Item {
     onFileChanged: reload()
   }
 
-  // Watched rather than probed once, so running install.sh in a terminal turns
-  // the panel from read-only to writable without restarting the shell.
-  FileView {
-    id: helperFile
-    path: root.helperPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.helperInstalled = true
-    onLoadFailed: root.helperInstalled = false
-    onFileChanged: reload()
-  }
-
-  FileView {
-    id: policyFile
-    path: root.policyPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.policyInstalled = true
-    onLoadFailed: root.policyInstalled = false
-    onFileChanged: reload()
-  }
-
   // ---------------------------------------------------------------- processes
 
   Process {
@@ -239,9 +255,8 @@ Item {
     id: profilesProcess
     running: true
     // Reads the [Section] headers out of /etc/ufw/applications.d, which is
-    // world-readable. Only used to tell a typo from a real profile name before
-    // bothering the user for a password; the helper checks the name again
-    // against ufw itself.
+    // world-readable. A profile name is free text, so it is matched against
+    // this list rather than a pattern before it can become part of a command.
     command: ["grep", "-rho", "^\\[[^]]*\\]", "/etc/ufw/applications.d"]
     stdout: StdioCollector {
       id: profilesStdout

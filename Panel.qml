@@ -111,15 +111,14 @@ Panel {
 
   function requireManage() {
     if (firewall.canManage) return true
-    firewall.lastError = firewall.helperInstalled
-      ? "The polkit action is missing. Re-run install.sh as root."
-      : "Read-only: run install.sh as root to allow changes."
+    firewall.lastError = "ufw is not installed."
     return false
   }
 
-  // Disabling asks twice on purpose. The password dialog that follows says only
-  // that the firewall is being changed, so the question of whether to take the
-  // firewall down entirely is put here, where it can name what it means.
+  // Disabling asks twice on purpose. The password dialog that follows is
+  // polkit's, and says only that a program is being run as root, so the
+  // question of whether to take the firewall down entirely is put here, where
+  // it can name what it means.
   function requestToggle() {
     if (!firewall.installed || firewall.busy) return
     if (!requireManage()) return
@@ -392,15 +391,6 @@ Panel {
               text: firewall.configEnabled
                 ? "ufw is enabled in its config but the unit is not running. Nothing is being filtered."
                 : "ufw is disabled in its config but the unit is still running."
-            }
-
-            Notice {
-              visible: firewall.installed && !firewall.canManage
-              width: parent.width
-              tone: root.dim
-              text: firewall.helperInstalled
-                ? "Read-only: the polkit action is missing. Re-run install.sh as root."
-                : "Read-only. Run install.sh as root once to allow changes; every change then asks for your password."
             }
 
             Notice {

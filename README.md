@@ -36,67 +36,70 @@ widget nobody keeps on protects nobody.
 Every change runs as:
 
 ```
-pkexec /usr/local/lib/omarchy-firewall/omarchy-firewall <command> [args...]
+pkexec /usr/bin/ufw --force <command> [args...]
 ```
 
 - **The password dialog is Omarchy's own.** pkexec hands authentication to
   polkit, which hands it to the agent running inside `omarchy-shell`
   (`omarchy.polkit`), so the prompt is the themed Omarchy dialog rather than a
   terminal or a foreign toolkit.
-- **Every single change prompts.** The polkit action
-  `dev.nahime.firewall.manage` is declared `auth_admin`, not `auth_admin_keep`.
-  `auth_admin_keep` would cache the authorisation for a few minutes, so only the
-  first change in a burst would ask. Enabling, disabling, adding a rule and
-  deleting a rule each authenticate on their own.
-- **`allow_any` and `allow_inactive` are `no`.** The change has to come from the
-  session actually sitting at the machine.
-- **The program that runs as root is root-owned.** The helper is copied to
-  `/usr/local/lib/omarchy-firewall/` as `root:root 0755`, and the polkit action
-  is pinned to that path. The copy in this plugin directory lives under
-  `~/.config` and is writable by the user's session; running *that* under pkexec
-  would mean anything able to write the user's home gets root the next time a
-  firewall change is authorised. It is never executed.
-- **Arguments are validated as root, by the helper.** Nothing the caller sends
-  is forwarded to ufw verbatim: the helper walks the tokens, checks each one
+- **Every single change prompts.** pkexec falls under the polkit action
+  `org.freedesktop.policykit.exec`, which is `auth_admin` — not
+  `auth_admin_keep`. The `_keep` variant would cache the authorisation for a few
+  minutes, so only the first change in a burst would ask. Enabling, disabling,
+  adding a rule and deleting a rule each authenticate on their own.
+- **The program that runs as root is `/usr/bin/ufw` itself** — `root:root 0755`,
+  shipped by the distribution. Nothing to install, and nothing writable by the
+  user's session anywhere on the privileged path.
+
+  This is the part worth being deliberate about. An earlier draft of this plugin
+  shipped its own helper script and ran *that* under pkexec. A script living
+  under `~/.config` is writable by the user's session, so anything able to write
+  the home directory would have got root the next time a firewall change was
+  authorised — the same shape as the `NOPASSWD` grants that Omarchy's migration
+  `1788025225` exists to delete. Working around it meant an install step, and an
+  install step to use a firewall panel is the wrong trade when ufw's own binary
+  already solves the problem.
+- **No sudoers entry, ever**, for exactly the reason above.
+- **Arguments are rebuilt, not filtered.** Nothing typed or reconstructed
+  reaches ufw verbatim. `Model.walkSpec` walks the tokens, recognises each one
   (ports in range, ranges ordered, addresses well-formed, protocols tcp/udp,
-  application profiles checked against `ufw app list`), and rebuilds ufw's argv
-  from the validated pieces. No shell is involved anywhere on the path. The
-  panel validates too, but only so a typo produces an inline message instead of
-  a password prompt followed by an error — that check is a convenience and is
-  not what makes anything safe.
-- **No sudoers entry, ever.** Omarchy's own migration `1788025225` exists to
-  delete `NOPASSWD: /usr/bin/ufw` grants left behind by retired installers,
-  because they were a privilege escalation. This plugin does not reintroduce
-  one under a new name.
+  application profiles matched against `/etc/ufw/applications.d`) and returns a
+  **new** array built from what it recognised. That array is what becomes the
+  command, so a token the walker does not understand cannot reach the command
+  line by being passed through untouched. `Service.qml` re-walks the tokens once
+  more immediately before building the command — including the ones this plugin
+  reconstructed itself — so no code path can skip the check.
+- **No shell anywhere.** Quickshell's `Process` takes an argv array. There is no
+  string to quote and nothing to escape.
 - **Deletion is by rule specification, never by number.** `ufw status numbered`
   interleaves the v4 and v6 rules and renumbers on every change, so an index
   worked out from the config files can point at a different rule by the time it
   is used. For a firewall, deleting the wrong rule means opening a port. ufw
-  itself does the matching.
+  itself does the matching, and its matcher tolerates a differing comment
+  (`common.py:match()` returns `-2` for "equal except the comment"), so the
+  comment is not sent.
 
-Until `install.sh` has been run the plugin still loads and still shows
-everything — it is simply read-only, and says so.
+### What this does not protect against
+
+An attacker who can already write your home directory can change the arguments
+this plugin sends, and ride the prompt you answer. They cannot get arbitrary
+code execution that way — `pkexec` is pinned to `/usr/bin/ufw`, which
+manipulates firewall rules and nothing else — but they could get a rule they
+chose. Nothing short of a root-owned helper closes that, and a root-owned helper
+costs an install step and reintroduces a user-writable-path problem of its own
+if it is ever installed carelessly. The trade is deliberate.
 
 ## Install
 
 ```bash
 omarchy plugin add https://github.com/nahime/omarchy-firewall.git
-sudo ~/.config/omarchy/plugins/nahime.firewall/install.sh
 omarchy plugin enable nahime.firewall --section right
 ```
 
-`install.sh` is the only step that needs root, and it is needed once. It
-installs two files:
-
-```
-/usr/local/lib/omarchy-firewall/omarchy-firewall          root:root 0755
-/usr/share/polkit-1/actions/dev.nahime.firewall.policy    root:root 0644
-```
-
-Re-run it after pulling an update that touches `bin/` or `polkit/`; the plugin
-runs the installed copy, not the one in the repo.
-
-`sudo ./uninstall.sh` removes both and drops the plugin back to read-only.
+That is all of it. There is no privileged setup step: the widget reads
+everything it shows without permissions, and asks for your password at the
+moment it changes something.
 
 ## Using it
 
@@ -105,9 +108,10 @@ is down, hollow with a dot when the config and the unit disagree. Left click
 opens the panel, right click re-reads state.
 
 Right click deliberately does *not* toggle the firewall. One slip would take the
-firewall down, and the password dialog that follows says only that the firewall
-is being changed — so the toggle lives in the panel, next to the rules it
-affects, behind a confirmation that names what it does.
+firewall down, and the polkit dialog that follows says only that a program is
+being run as root — it cannot tell you *what* you are about to authorise. So the
+toggle lives in the panel, next to the rules it affects, behind a confirmation
+that names what it does.
 
 **Panel.**
 
@@ -189,11 +193,9 @@ omarchy-shell shell rescanPlugins
 manifest.json                      plugin manifest (schemaVersion 1)
 Panel.qml                          bar button + popup panel
 Service.qml                        state, file watchers, the one privileged path
+                                   (_runUfw — every change goes through it)
 Model.js                           parsing and formatting, no Qt
 FirewallIcon.qml                   the shield
-bin/omarchy-firewall               the only thing that ever runs as root
-polkit/dev.nahime.firewall.policy  the action pkexec authenticates against
-install.sh / uninstall.sh          install the two files above, as root
 test/                              node test suite and fixtures
 ```
 
@@ -201,7 +203,8 @@ test/                              node test suite and fixtures
 
 - Omarchy 4.x (`omarchy-shell` with the plugin registry)
 - `ufw`
-- `polkit` with the Omarchy agent (`omarchy.polkit`, on by default)
+- `polkit` with the Omarchy agent (`omarchy.polkit`, on by default) and the
+  account in an administrator group (`wheel`)
 
 ## Licence
 
