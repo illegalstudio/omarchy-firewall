@@ -24,7 +24,7 @@
   and a guided form for adding rules. Reading needs no permissions at all, because it comes
   from the same world-readable files <code>ufw status</code> renders. Changing anything runs
   <code>pkexec ufw</code>, so Omarchy's own password dialog stands in front of every enable,
-  disable, add and delete — one prompt per change, nothing cached in between.
+  disable, add and delete: one prompt per change, nothing cached in between.
 </p>
 
 <p align="center">
@@ -35,6 +35,18 @@
 
 Plugin id `illegalstudio.omarchy-firewall`, kind `bar-widget`, built against the Omarchy 4.x
 shell plugin contract.
+
+## Why
+
+Omarchy enables ufw by default. That is a good baseline, but it adds a small
+piece of friction to everyday local development: start Expo and your phone may
+need access to the Metro port; run `php artisan serve --host=0.0.0.0` and
+another device needs Laravel's port; spin up any other development server and
+you have to remember which ufw command opens it, and which rule to remove when
+you are done. This plugin keeps the firewall configuration one click away in
+the Omarchy bar, so you can inspect the current rules, open exactly the port you
+need and close it again without leaving your flow. Every change still requires
+your password.
 
 ## Security model
 
@@ -56,7 +68,7 @@ design, and that are the same source `ufw status` renders from:
 | `systemctl is-active ufw` | whether the unit is actually running |
 
 They are watched, not polled, so the panel is right within a moment of any
-change — including one made from a terminal. A bar widget that asked for a
+change, including one made from a terminal. A bar widget that asked for a
 password to refresh itself would be turned off within a day, and a firewall
 widget nobody keeps on protects nobody.
 
@@ -73,11 +85,11 @@ pkexec /usr/bin/ufw --force <command> [args...]
   (`omarchy.polkit`), so the prompt is the themed Omarchy dialog rather than a
   terminal or a foreign toolkit.
 - **Every single change prompts.** pkexec falls under the polkit action
-  `org.freedesktop.policykit.exec`, which is `auth_admin` — not
+  `org.freedesktop.policykit.exec`, which is `auth_admin`, not
   `auth_admin_keep`. The `_keep` variant would cache the authorisation for a few
   minutes, so only the first change in a burst would ask. Enabling, disabling,
   adding a rule and deleting a rule each authenticate on their own.
-- **The program that runs as root is `/usr/bin/ufw` itself** — `root:root 0755`,
+- **The program that runs as root is `/usr/bin/ufw` itself:** `root:root 0755`,
   shipped by the distribution. Nothing to install, and nothing writable by the
   user's session anywhere on the privileged path.
 
@@ -85,10 +97,10 @@ pkexec /usr/bin/ufw --force <command> [args...]
   shipped its own helper script and ran *that* under pkexec. A script living
   under `~/.config` is writable by the user's session, so anything able to write
   the home directory would have got root the next time a firewall change was
-  authorised — the same shape as the `NOPASSWD` grants that Omarchy's migration
-  `1788025225` exists to delete. Working around it meant an install step, and an
-  install step to use a firewall panel is the wrong trade when ufw's own binary
-  already solves the problem.
+  authorised. This is the same shape as the `NOPASSWD` grants that Omarchy's
+  migration `1788025225` exists to delete. Working around it meant an install
+  step, and an install step to use a firewall panel is the wrong trade when
+  ufw's own binary already solves the problem.
 - **No sudoers entry, ever**, for exactly the reason above.
 - **Arguments are rebuilt, not filtered.** Nothing typed or reconstructed
   reaches ufw verbatim. `Model.walkSpec` walks the tokens, recognises each one
@@ -97,8 +109,8 @@ pkexec /usr/bin/ufw --force <command> [args...]
   **new** array built from what it recognised. That array is what becomes the
   command, so a token the walker does not understand cannot reach the command
   line by being passed through untouched. `Service.qml` re-walks the tokens once
-  more immediately before building the command — including the ones this plugin
-  reconstructed itself — so no code path can skip the check.
+  more immediately before building the command, including the ones this plugin
+  reconstructed itself, so no code path can skip the check.
 - **No shell anywhere.** Quickshell's `Process` takes an argv array. There is no
   string to quote and nothing to escape.
 - **`--force` only on `enable`.** ufw 0.36.2 mis-parses `--force` in front of a
@@ -121,8 +133,8 @@ pkexec /usr/bin/ufw --force <command> [args...]
 
 An attacker who can already write your home directory can change the arguments
 this plugin sends, and ride the prompt you answer. They cannot get arbitrary
-code execution that way — `pkexec` is pinned to `/usr/bin/ufw`, which
-manipulates firewall rules and nothing else — but they could get a rule they
+code execution that way. `pkexec` is pinned to `/usr/bin/ufw`, which
+manipulates firewall rules and nothing else, but they could get a rule they
 chose. Nothing short of a root-owned helper closes that, and a root-owned helper
 costs an install step and reintroduces a user-writable-path problem of its own
 if it is ever installed carelessly. The trade is deliberate.
@@ -146,19 +158,19 @@ opens the panel, right click re-reads state.
 
 Right click deliberately does *not* toggle the firewall. One slip would take the
 firewall down, and the polkit dialog that follows says only that a program is
-being run as root — it cannot tell you *what* you are about to authorise. So the
+being run as root; it cannot tell you *what* you are about to authorise. So the
 toggle lives in the panel, next to the rules it affects, behind a confirmation
 that names what it does.
 
 **Panel.**
 
-- `j` / `k` or arrows — move the cursor
-- `enter` / `space` — activate the row under the cursor
-- `a` — add a rule
-- `x` or `d` — delete the rule under the cursor
-- `t` — toggle the firewall
-- `r` — re-read state
-- `esc` — close, or cancel the rule being typed
+- `j` / `k` or arrows: move the cursor
+- `enter` / `space`: activate the row under the cursor
+- `a`: add a rule
+- `x` or `d`: delete the rule under the cursor
+- `t`: toggle the firewall
+- `r`: re-read state
+- `esc`: close, or cancel the rule being typed
 
 **Adding a rule.** `a`, or the *Add rule* row, replaces the list with a guided
 form. Everything with a fixed set of answers is a row of chips; the only things
@@ -177,9 +189,9 @@ typed are a port number, an optional source address and an optional comment:
 `j`/`k` move between rows, `h`/`l` change the value on the row you are on,
 `enter` edits a text box or presses the button, `esc` goes back.
 
-Under the form sits the exact command that will run — `ufw allow 8080/tcp` —
-or, when the combination is not one ufw accepts, the reason. Two such cases the
-form will tell you about rather than let you find out after typing your
+Under the form sits either the exact command that will run, such as `ufw allow
+8080/tcp`, or the reason the combination is not accepted by ufw. Two such cases
+the form will tell you about rather than let you find out after typing your
 password: a port range has to name TCP or UDP (ufw cannot write one rule
 covering both for a range), and an application profile cannot be narrowed to a
 single source address (ufw has no syntax joining the two).
@@ -192,10 +204,10 @@ you want it on a keybind.
 Some rules are displayed but cannot be deleted from the panel, marked
 `read-only` with the reason in their tooltip:
 
-- **Route rules** (`ufw route ...`) — a different verb, out of scope here.
-- **Interface-bound rules** (`in_eth0`) — no single-command equivalent is
+- **Route rules** (`ufw route ...`): a different verb, out of scope here.
+- **Interface-bound rules** (`in_eth0`): no single-command equivalent is
   reconstructed for them.
-- **Multiport rules** (`80,443` in one rule) and source application profiles —
+- **Multiport rules** (`80,443` in one rule) and source application profiles:
   same reason.
 
 The rule shapes that cannot be reproduced exactly are shown as they are rather
@@ -241,7 +253,7 @@ omarchy-shell shell rescanPlugins
 manifest.json                      plugin manifest (schemaVersion 1)
 Panel.qml                          bar button + popup panel
 Service.qml                        state, file watchers, the one privileged path
-                                   (_runUfw — every change goes through it)
+                                   (_runUfw: every change goes through it)
 Model.js                           parsing and formatting, no Qt
 FirewallIcon.qml                   the shield
 assets/logo-mark.svg               the same shield, as the project mark
