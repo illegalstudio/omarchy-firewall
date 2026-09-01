@@ -1,8 +1,37 @@
-# Firewall widget for Omarchy
+<p align="center">
+  <img src="assets/logo-mark.png" alt="Omarchy Firewall logo" width="130">
+</p>
 
-A bar widget for ufw: status at a glance, the rule list in a keyboard-driven
-panel, and add / delete / enable / disable — with the Omarchy password dialog in
-front of every change.
+<h1 align="center">Omarchy Firewall</h1>
+
+<p align="center">
+  <em>Your ufw rules in the Omarchy bar, and your password in front of every change.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/illegalstudio/omarchy-firewall/stargazers"><img src="https://img.shields.io/github/stars/illegalstudio/omarchy-firewall?style=flat-square&logo=github&logoColor=white&label=stars&color=E05252" alt="Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/illegalstudio/omarchy-firewall?style=flat-square&color=E05252" alt="License: MIT"></a>
+  <a href="https://omarchy.org"><img src="https://img.shields.io/badge/Omarchy-4.x-E05252?style=flat-square" alt="Omarchy 4.x"></a>
+  <a href="https://x.com/nahime0"><img src="https://img.shields.io/badge/Follow-%40nahime0-E05252?style=flat-square&logo=x&logoColor=white" alt="Follow @nahime0 on X"></a>
+</p>
+
+<p align="center">
+  <strong>No setup step &middot; Reads with no privileges &middot; Password prompt on every change &middot; Keyboard-driven</strong>
+</p>
+
+<p align="center">
+  A bar widget for ufw: firewall state at a glance, the rule list in a keyboard-driven panel,
+  and a guided form for adding rules. Reading needs no permissions at all, because it comes
+  from the same world-readable files <code>ufw status</code> renders. Changing anything runs
+  <code>pkexec ufw</code>, so Omarchy's own password dialog stands in front of every enable,
+  disable, add and delete — one prompt per change, nothing cached in between.
+</p>
+
+<p align="center">
+  <a href="https://opensource.nahi.me"><strong>Official Website</strong></a>
+</p>
+
+---
 
 Plugin id `illegalstudio.omarchy-firewall`, kind `bar-widget`, built against the Omarchy 4.x
 shell plugin contract.
@@ -215,6 +244,7 @@ Service.qml                        state, file watchers, the one privileged path
                                    (_runUfw — every change goes through it)
 Model.js                           parsing and formatting, no Qt
 FirewallIcon.qml                   the shield
+assets/logo-mark.svg               the same shield, as the project mark
 test/                              node test suite and fixtures
 ```
 

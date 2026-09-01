@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 176 208" width="176" height="208" role="img" aria-label="Omarchy Firewall">
+  <!--
+    The shield the widget draws in the bar, from FirewallIcon.qml's ShapePath,
+    with the round joins its stroke produces. Drawn twice at two scales: the
+    outer boundary and the core it keeps. Recolour by changing both fills.
+  -->
+  <g fill="none" stroke="#E05252" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M 88 14 L 162 50 L 162 112 L 88 194 L 14 112 L 14 50 Z" stroke-width="18"/>
+    <path d="M 88 62 L 124 79 L 124 108 L 88 146 L 52 108 L 52 79 Z" stroke-width="14" fill="#E05252"/>
+  </g>
+</svg>
