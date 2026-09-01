@@ -150,6 +150,13 @@ That is all of it. There is no privileged setup step: the widget reads
 everything it shows without permissions, and asks for your password at the
 moment it changes something.
 
+## Remove
+
+```bash
+omarchy plugin disable illegalstudio.omarchy-firewall
+omarchy plugin remove illegalstudio.omarchy-firewall
+```
+
 ## Using it
 
 **Bar icon.** A shield: filled when the firewall is up, struck through when it
