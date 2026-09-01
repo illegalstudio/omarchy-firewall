@@ -1,18 +1,15 @@
 import QtQuick
-import Quickshell
 import Quickshell.Io
-import qs.Commons
 import "Model.js" as Model
 
 // State and actions for the firewall widget.
 //
 // Reading and writing are deliberately asymmetric:
 //
-//   Reading  is unprivileged. /etc/ufw/ufw.conf, /etc/default/ufw and
-//            /etc/ufw/user{,6}.rules are all world-readable, and they are what
-//            `ufw status` itself renders. Watching them means the panel is
-//            correct within a moment of any change, including one made from a
-//            terminal, and never asks for anything.
+//   Reading  is unprivileged. scripts/read-state.pl opens the world-readable
+//            ufw files through no-follow file descriptors with strict byte,
+//            file and profile-count limits. Its JSON output is capped before
+//            it reaches this process, and the QML stream has a second cap.
 //
 //   Writing  goes through exactly one function, _runUfw, which runs
 //            `pkexec /usr/bin/ufw ...`. pkexec hands authentication to polkit,
@@ -39,6 +36,14 @@ Item {
 
   readonly property string pkexecPath: "/usr/bin/pkexec"
   readonly property string ufwPath: "/usr/bin/ufw"
+  readonly property string stateReaderPath: {
+    var value = String(Qt.resolvedUrl("scripts/read-state.pl"))
+    return value.indexOf("file://") === 0
+      ? decodeURIComponent(value.substring(7))
+      : value
+  }
+  readonly property int stateOutputLimit: 6 * 1024 * 1024
+  readonly property int diagnosticOutputLimit: 512
 
   property var settings: ({})
 
@@ -51,6 +56,7 @@ Item {
   property var rows: []
   property var appProfiles: []
   property bool loaded: false
+  property string readError: ""
 
   // Nothing to install: if ufw is here, changes can be made, and each one asks
   // for the password when it is made.
@@ -59,6 +65,8 @@ Item {
   // ---- action state
   property string actionStatus: ""
   property string lastError: ""
+  property string _actionStdoutText: ""
+  property string _actionStderrText: ""
   readonly property bool busy: actionProcess.running
 
   // The firewall is up only when the config says so AND the unit is running.
@@ -70,6 +78,7 @@ Item {
 
   readonly property string statusText: {
     if (!installed) return "ufw is not installed"
+    if (readError !== "") return readError
     if (!loaded) return "Reading configuration"
     if (configEnabled && serviceActive) return "Active"
     if (!configEnabled && !serviceActive) return "Inactive"
@@ -92,6 +101,10 @@ Item {
   property string _defaultsText: ""
   property string _rules4Text: ""
   property string _rules6Text: ""
+  property string _stateOutput: ""
+  property string _stateErrorOutput: ""
+  property bool _stateOutputOverflow: false
+  property bool _stateErrorOverflow: false
 
   function _rebuild() {
     var conf = Model.parseUfwConf(_confText)
@@ -103,12 +116,74 @@ Item {
   }
 
   function refresh() {
-    confFile.reload()
-    defaultsFile.reload()
-    rules4File.reload()
-    rules6File.reload()
+    if (!stateProcess.running) stateProcess.running = true
     if (!unitProcess.running) unitProcess.running = true
-    if (!profilesProcess.running) profilesProcess.running = true
+  }
+
+  function _appendStateOutput(data, errorStream) {
+    var chunk = String(data || "")
+    var current = errorStream ? _stateErrorOutput : _stateOutput
+    var limit = errorStream ? diagnosticOutputLimit : stateOutputLimit
+    var remaining = Math.max(0, limit - current.length)
+    if (chunk.length > remaining) {
+      if (errorStream) _stateErrorOverflow = true
+      else _stateOutputOverflow = true
+    }
+    if (remaining > 0) {
+      if (errorStream) _stateErrorOutput += chunk.substring(0, remaining)
+      else _stateOutput += chunk.substring(0, remaining)
+    }
+  }
+
+  function _stateReadFailed(message) {
+    var text = String(message || "Could not read firewall state").replace(/\s+/g, " ").trim()
+    readError = text.length > 160 ? text.substring(0, 157) + "..." : text
+    loaded = false
+    rows = []
+    appProfiles = []
+  }
+
+  function _finishStateRead(exitCode) {
+    if (_stateOutputOverflow || _stateErrorOverflow) {
+      _stateReadFailed("Firewall state output exceeded its safety limit")
+      return
+    }
+    if (exitCode !== 0) {
+      _stateReadFailed(_stateErrorOutput || "The bounded firewall state reader failed")
+      return
+    }
+
+    var payload
+    try {
+      payload = JSON.parse(_stateOutput)
+    } catch (error) {
+      _stateReadFailed("The bounded firewall state reader returned invalid data")
+      return
+    }
+    if (!payload || payload.ok !== true) {
+      _stateReadFailed(payload && payload.error
+        ? payload.error
+        : "The bounded firewall state reader rejected the current files")
+      return
+    }
+
+    installed = payload.installed === true
+    _confText = String(payload.conf || "")
+    _defaultsText = String(payload.defaults || "")
+    _rules4Text = String(payload.rules4 || "")
+    _rules6Text = String(payload.rules6 || "")
+    appProfiles = Array.isArray(payload.profiles) ? payload.profiles.slice(0, 256) : []
+    readError = ""
+    _rebuild()
+  }
+
+  function _appendActionOutput(data, errorStream) {
+    var chunk = String(data || "")
+    var current = errorStream ? _actionStderrText : _actionStdoutText
+    var remaining = Math.max(0, diagnosticOutputLimit - current.length)
+    if (remaining <= 0) return
+    if (errorStream) _actionStderrText += chunk.substring(0, remaining)
+    else _actionStdoutText += chunk.substring(0, remaining)
   }
 
   // ------------------------------------------------------------------ writing
@@ -136,6 +211,8 @@ Item {
 
     lastError = ""
     actionStatus = pendingText
+    _actionStdoutText = ""
+    _actionStderrText = ""
     actionProcess.command = [pkexecPath, ufwPath].concat(args)
     actionProcess.running = true
     return true
@@ -206,81 +283,48 @@ Item {
     return _runUfw(["delete", String(row.action)].concat(safe), "Deleting the rule")
   }
 
-  // ---------------------------------------------------------------- watchers
-
-  FileView {
-    id: confFile
-    path: "/etc/ufw/ufw.conf"
-    watchChanges: true
-    printErrors: false
-    onLoaded: { root.installed = true; root._confText = text(); root._rebuild() }
-    onLoadFailed: { root.installed = false; root._confText = ""; root._rebuild() }
-    onFileChanged: reload()
-  }
-
-  FileView {
-    id: defaultsFile
-    path: "/etc/default/ufw"
-    watchChanges: true
-    printErrors: false
-    onLoaded: { root._defaultsText = text(); root._rebuild() }
-    onLoadFailed: { root._defaultsText = ""; root._rebuild() }
-    onFileChanged: reload()
-  }
-
-  FileView {
-    id: rules4File
-    path: "/etc/ufw/user.rules"
-    watchChanges: true
-    printErrors: false
-    onLoaded: { root._rules4Text = text(); root._rebuild() }
-    onLoadFailed: { root._rules4Text = ""; root._rebuild() }
-    onFileChanged: reload()
-  }
-
-  FileView {
-    id: rules6File
-    path: "/etc/ufw/user6.rules"
-    watchChanges: true
-    printErrors: false
-    onLoaded: { root._rules6Text = text(); root._rebuild() }
-    onLoadFailed: { root._rules6Text = ""; root._rebuild() }
-    onFileChanged: reload()
-  }
-
   // ---------------------------------------------------------------- processes
+
+  Process {
+    id: stateProcess
+    running: true
+    command: ["/usr/bin/perl", root.stateReaderPath]
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root._appendStateOutput(data, false) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root._appendStateOutput(data, true) }
+    }
+    onStarted: {
+      root._stateOutput = ""
+      root._stateErrorOutput = ""
+      root._stateOutputOverflow = false
+      root._stateErrorOverflow = false
+    }
+    onExited: function(exitCode) { root._finishStateRead(exitCode) }
+  }
 
   Process {
     id: unitProcess
     running: true
-    command: ["systemctl", "is-active", "ufw"]
-    stdout: StdioCollector {
-      id: unitStdout
-      waitForEnd: true
-      onStreamFinished: root.serviceActive = String(text || "").trim() === "active"
-    }
-  }
-
-  Process {
-    id: profilesProcess
-    running: true
-    // Reads the [Section] headers out of /etc/ufw/applications.d, which is
-    // world-readable. A profile name is free text, so it is matched against
-    // this list rather than a pattern before it can become part of a command.
-    command: ["grep", "-rho", "^\\[[^]]*\\]", "/etc/ufw/applications.d"]
-    stdout: StdioCollector {
-      id: profilesStdout
-      waitForEnd: true
-      onStreamFinished: root.appProfiles = Model.parseAppProfiles(String(text || ""))
-    }
+    command: ["/usr/bin/systemctl", "--quiet", "is-active", "ufw"]
+    onExited: function(exitCode) { root.serviceActive = exitCode === 0 }
   }
 
   Process {
     id: actionProcess
     running: false
     command: []
-    stdout: StdioCollector { id: actionStdout; waitForEnd: true }
-    stderr: StdioCollector { id: actionStderr; waitForEnd: true }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root._appendActionOutput(data, false) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root._appendActionOutput(data, true) }
+    }
     onExited: function(exitCode) {
       var ok = exitCode === 0
       if (ok) {
@@ -288,12 +332,11 @@ Item {
         root.actionStatus = ""
       } else {
         root.lastError = root._describeFailure(exitCode,
-          String(actionStderr.text || ""), String(actionStdout.text || ""))
+          root._actionStderrText, root._actionStdoutText)
         root.actionStatus = ""
       }
-      // ufw rewrites user.rules through a temp file and a rename, which some
-      // inotify watches do not survive; re-read explicitly rather than trusting
-      // the watch to have followed it.
+      // Re-read explicitly after every action so the panel does not wait for
+      // the next bounded polling interval.
       root.refresh()
       settleTimer.restart()
       root.actionFinished(ok)

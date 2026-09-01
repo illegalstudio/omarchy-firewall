@@ -653,7 +653,9 @@ Panel {
                 textFormat: Text.PlainText
                 visible: root.rows.length === 0
                 width: parent.width
-                text: firewall.loaded ? "No rules." : "Reading /etc/ufw…"
+                text: firewall.readError !== ""
+                  ? firewall.readError
+                  : firewall.loaded ? "No rules." : "Reading /etc/ufw…"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body

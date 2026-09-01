@@ -67,10 +67,18 @@ design, and that are the same source `ufw status` renders from:
 | `/etc/ufw/applications.d/` | application profile names |
 | `systemctl is-active ufw` | whether the unit is actually running |
 
-They are watched, not polled, so the panel is right within a moment of any
-change, including one made from a terminal. A bar widget that asked for a
-password to refresh itself would be turned off within a day, and a firewall
-widget nobody keeps on protects nobody.
+The bundled `scripts/read-state.pl` reader opens regular files with
+`O_NOFOLLOW` and bounded descriptor reads. The limits are 16 KiB for
+`ufw.conf`, 64 KiB for the defaults, and 2 MiB for each rules file. Profile
+discovery is non-recursive and stops at 256 directory entries, 128 regular
+files, 64 KiB per file, or 256 accepted profile names. Its JSON output is
+capped at 6 MiB before Quickshell receives it, and QML applies the same cap to
+its streaming buffer. Process diagnostics retain at most 512 characters per
+stream.
+
+The panel refreshes this bounded snapshot every 30 seconds by default, after
+each firewall action, and whenever the user requests a refresh. Reading never
+asks for a password.
 
 ### Writing goes through exactly one door
 
@@ -235,13 +243,14 @@ labelled, and deleting one says so in the confirmation.
 
 ## Development
 
-`Model.js` is plain ES5 with no Qt imports, so all the parsing is testable
-without a shell and without root:
+`Model.js` is plain ES5 with no Qt imports. The parser and bounded reader are
+testable without root:
 
 ```bash
 node test/run.js           # assertions
 node test/run.js --show    # plus the parsed table, to compare with
                            # sudo ufw status numbered
+perl test/read-state.t     # descriptor and resource-limit checks
 ```
 
 The fixtures under `test/fixtures/` were captured from a real Omarchy machine
@@ -259,18 +268,20 @@ omarchy-shell shell rescanPlugins
 ```
 manifest.json                      plugin manifest (schemaVersion 1)
 Panel.qml                          bar button + popup panel
-Service.qml                        state, file watchers, the one privileged path
+Service.qml                        bounded state stream, the one privileged path
                                    (_runUfw: every change goes through it)
 Model.js                           parsing and formatting, no Qt
 FirewallIcon.qml                   the shield
 assets/logo-mark.svg               the same shield, as the project mark
-test/                              node test suite and fixtures
+scripts/read-state.pl              bounded unprivileged state reader
+test/                              node and Perl tests plus fixtures
 ```
 
 ## Requirements
 
 - Omarchy 4.x (`omarchy-shell` with the plugin registry)
 - `ufw`
+- `perl` (already required by Omarchy)
 - `polkit` with the Omarchy agent (`omarchy.polkit`, on by default) and the
   account in an administrator group (`wheel`)
 
