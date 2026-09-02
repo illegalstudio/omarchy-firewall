@@ -61,6 +61,8 @@ ok($snapshot->{ok}, "fixture snapshot succeeds");
 ok($snapshot->{installed}, "fixture snapshot reports ufw installed");
 like($snapshot->{conf}, qr/^ENABLED=yes/m, "configuration is read");
 like($snapshot->{rules4}, qr/^### tuple ###/m, "IPv4 tuples are read");
+unlike($snapshot->{rules4}, qr/^-A /m, "non-tuple rule lines stay out of QML");
+like($snapshot->{rulesDigest}, qr/\A[0-9a-f]{64}\z/, "rule digest is fixed-size");
 ok(
   scalar(grep { $_ eq "Web Server" } @{$snapshot->{profiles}}),
   "application profiles are discovered",
@@ -75,6 +77,47 @@ my $symlink = File::Spec->catfile($temporary, "linked");
 symlink($paths{conf}, $symlink) or die "Cannot create test symlink: $!";
 eval { read_bounded_file($symlink, 1024, 0) };
 like($@, qr/Cannot open/, "symbolic links are rejected");
+
+my ($tools_ready, $tools_error) = inspect_action_tools();
+ok($tools_ready, "installed action executables pass ownership checks")
+  or diag($tools_error);
+my $tool_link = File::Spec->catfile($temporary, "ufw-link");
+symlink("/usr/bin/ufw", $tool_link) or die "Cannot create executable symlink: $!";
+my ($linked_tool_ready, $linked_tool_error) = inspect_action_tools([$tool_link]);
+ok(!$linked_tool_ready, "symbolic-link action executable is rejected");
+like($linked_tool_error, qr/non-regular executable/, "tool rejection is explicit");
+
+my $first_digest = $snapshot->{rulesDigest};
+write_bytes(
+  $paths{rules4},
+  fixture_bytes("user.rules")
+    . "### tuple ### allow tcp 65530 0.0.0.0/0 any 0.0.0.0/0 in\n",
+);
+my $changed_snapshot = build_snapshot(\%paths);
+isnt($changed_snapshot->{rulesDigest}, $first_digest, "rule digest changes with persisted tuples");
+write_bytes($paths{rules4}, fixture_bytes("user.rules"));
+
+my $crowded_rules = File::Spec->catfile($temporary, "crowded.rules");
+write_bytes(
+  $crowded_rules,
+  scalar(("### tuple ### allow tcp 443 0.0.0.0/0 any 0.0.0.0/0 in\n")
+    x (MAX_RULE_RECORDS() + 1)),
+);
+eval { read_bounded_rules($crowded_rules, 0) };
+my $crowded_rules_error = $@;
+like($crowded_rules_error, qr/Rule count exceeds 512 records/, "rule record count is bounded");
+
+my $too_many_lines = File::Spec->catfile($temporary, "many-lines.rules");
+write_bytes($too_many_lines, scalar("#\n" x (MAX_RULE_LINES() + 1)));
+eval { read_bounded_rules($too_many_lines, 0) };
+my $too_many_lines_error = $@;
+like($too_many_lines_error, qr/Rule file exceeds 8192 lines/, "rule line count is bounded");
+
+my $long_line = File::Spec->catfile($temporary, "long-line.rules");
+write_bytes($long_line, scalar("#" x (MAX_RULE_LINE_BYTES() + 1)));
+eval { read_bounded_rules($long_line, 0) };
+my $long_line_error = $@;
+like($long_line_error, qr/Rule line exceeds 4096 bytes/, "individual rule lines are bounded");
 
 my $crowded = File::Spec->catdir($temporary, "crowded");
 make_path($crowded);

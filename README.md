@@ -23,7 +23,7 @@
   A bar widget for ufw: firewall state at a glance, the rule list in a keyboard-driven panel,
   and a guided form for adding rules. Reading needs no permissions at all, because it comes
   from the same world-readable files <code>ufw status</code> renders. Changing anything runs
-  <code>pkexec ufw</code>, so Omarchy's own password dialog stands in front of every enable,
+  <code>pkexec timeout ufw</code>, so Omarchy's own password dialog stands in front of every enable,
   disable, add and delete: one prompt per change, nothing cached in between.
 </p>
 
@@ -73,8 +73,11 @@ The bundled `scripts/read-state.pl` reader opens regular files with
 discovery is non-recursive and stops at 256 directory entries, 128 regular
 files, 64 KiB per file, or 256 accepted profile names. Its JSON output is
 capped at 6 MiB before Quickshell receives it, and QML applies the same cap to
-its streaming buffer. Process diagnostics retain at most 512 characters per
-stream.
+its streaming buffer. Each rules file is also limited to 8192 lines, 4096
+bytes per line and 512 tuple records. Only tuple records enter QML, and the
+model refuses to create more than 512 rendered rule rows. Process diagnostics
+retain at most 512 characters per stream. State and service reads have 5 and 3
+second deadlines with forced cleanup after a 1 second grace period.
 
 The panel refreshes this bounded snapshot every 30 seconds by default, after
 each firewall action, and whenever the user requests a refresh. Reading never
@@ -85,21 +88,39 @@ asks for a password.
 Every change runs as:
 
 ```
-pkexec /usr/bin/ufw --force <command> [args...]
+pkexec --disable-internal-agent /usr/bin/timeout \
+  --signal=TERM --kill-after=5s 45s \
+  /usr/bin/ufw <validated argv...>
 ```
+
+`scripts/run-action.pl` is an unprivileged supervisor around that exact argv.
+It validates the complete supported ufw grammar again, requests cancellation
+when the approval and launch envelope reaches 90 seconds, and notices if its
+parent shell disappears. After approval, the distribution-owned `timeout`
+process runs as root with UFW, so it can send TERM to the privileged process
+group after 45 seconds and KILL after a further 5 seconds. An independent QML
+guard stops the unprivileged supervisor after the combined 150 second bound and
+a 5 second grace. The supervisor retains at most 4096 bytes from each privileged
+output stream. On overflow it closes the producer pipes, requests termination
+and reports failure instead of silently discarding output.
 
 - **The password dialog is Omarchy's own.** pkexec hands authentication to
   polkit, which hands it to the agent running inside `omarchy-shell`
   (`omarchy.polkit`), so the prompt is the themed Omarchy dialog rather than a
-  terminal or a foreign toolkit.
+  terminal or a foreign toolkit. `--disable-internal-agent` makes a missing
+  registered agent fail closed instead of falling back to pkexec's textual
+  authentication agent.
 - **Every single change prompts.** pkexec falls under the polkit action
   `org.freedesktop.policykit.exec`, which is `auth_admin`, not
   `auth_admin_keep`. The `_keep` variant would cache the authorisation for a few
   minutes, so only the first change in a burst would ask. Enabling, disabling,
   adding a rule and deleting a rule each authenticate on their own.
-- **The program that runs as root is `/usr/bin/ufw` itself:** `root:root 0755`,
-  shipped by the distribution. Nothing to install, and nothing writable by the
-  user's session anywhere on the privileged path.
+- **Every executable on the privilege path is distribution-owned:**
+  `/usr/bin/pkexec` is `root:root 4755`; `/usr/bin/timeout` and `/usr/bin/ufw`
+  are `root:root 0755`. Before each action the supervisor rejects a missing,
+  linked, non-regular, non-root-owned or group/world-writable program. It applies
+  the same owner and write checks to `/usr` and `/usr/bin`. Nothing from the
+  plugin directory is executed after privilege elevation.
 
   This is the part worth being deliberate about. An earlier draft of this plugin
   shipped its own helper script and ran *that* under pkexec. A script living
@@ -108,7 +129,7 @@ pkexec /usr/bin/ufw --force <command> [args...]
   authorised. This is the same shape as the `NOPASSWD` grants that Omarchy's
   migration `1788025225` exists to delete. Working around it meant an install
   step, and an install step to use a firewall panel is the wrong trade when
-  ufw's own binary already solves the problem.
+  the existing root-owned timeout and ufw binaries already solve the problem.
 - **No sudoers entry, ever**, for exactly the reason above.
 - **Arguments are rebuilt, not filtered.** Nothing typed or reconstructed
   reaches ufw verbatim. `Model.walkSpec` walks the tokens, recognises each one
@@ -117,10 +138,33 @@ pkexec /usr/bin/ufw --force <command> [args...]
   **new** array built from what it recognised. That array is what becomes the
   command, so a token the walker does not understand cannot reach the command
   line by being passed through untouched. `Service.qml` re-walks the tokens once
-  more immediately before building the command, including the ones this plugin
-  reconstructed itself, so no code path can skip the check.
+  more immediately before building the command. The Perl supervisor then parses
+  a second closed grammar for lifecycle operations, rule actions, directions,
+  protocols, addresses, ports, ranges, profiles and comments before constructing
+  the fixed privileged argv.
 - **No shell anywhere.** Quickshell's `Process` takes an argv array. There is no
   string to quote and nothing to escape.
+- **Enable has action-specific consent.** Before `ufw --force enable`, the
+  panel repeats UFW's warning that existing SSH and remote connections may be
+  disrupted. Enable is allowed only from a freshly verified, fully inactive
+  state. The user must explicitly choose *Enable firewall* before the password
+  prompt appears, and the dialog includes the local-console recovery command.
+- **Every result is reconciled.** Success, failure, timeout, interruption and
+  output overflow all trigger generation-bound bounded reads of both the
+  configuration and the systemd unit before another action is allowed. Stale
+  snapshots cannot satisfy reconciliation, and the original action error is
+  retained if verification also fails. Enable and disable require their exact
+  state postconditions. Add and delete require the bounded persisted-rule digest
+  to change. An unverified enable or inconsistent state exposes a separate
+  *Emergency disable* action, with its own consent and password prompt, which
+  also remains available after a shell restart when UFW is present but its state
+  cannot be read. It succeeds only after both configuration and service are
+  freshly verified as inactive.
+- **Normal changes fail closed.** Enable, disable, reload, add and delete are
+  preceded by their own generation-bound configuration and service preflight.
+  They are blocked during reads and whenever configuration, service state,
+  executable trust or state consistency is unknown. Emergency disable is the
+  only explicit recovery exception.
 - **`--force` only on `enable`.** ufw 0.36.2 mis-parses `--force` in front of a
   rule: `frontend.parse_command()` inserts the implicit `rule` keyword by
   looking at `argv[1]` and only accounts for `--dry-run`, so with `--force`
@@ -139,13 +183,13 @@ pkexec /usr/bin/ufw --force <command> [args...]
 
 ### What this does not protect against
 
-An attacker who can already write your home directory can change the arguments
-this plugin sends, and ride the prompt you answer. They cannot get arbitrary
-code execution that way. `pkexec` is pinned to `/usr/bin/ufw`, which
-manipulates firewall rules and nothing else, but they could get a rule they
-chose. Nothing short of a root-owned helper closes that, and a root-owned helper
-costs an install step and reintroduces a user-writable-path problem of its own
-if it is ever installed carelessly. The trade is deliberate.
+An attacker who can already replace this user-owned plugin can also replace the
+program it asks pkexec to launch and try to ride a password prompt the user
+accepts. The reviewed code prevents that accidentally through fixed paths,
+closed grammars and executable ownership checks, but it is not a security
+boundary against a compromised user session. Closing that boundary would need
+a separately installed root-owned helper and a dedicated polkit action. This
+plugin deliberately avoids installing persistent privileged code.
 
 ## Install
 
@@ -251,6 +295,7 @@ node test/run.js           # assertions
 node test/run.js --show    # plus the parsed table, to compare with
                            # sudo ufw status numbered
 perl test/read-state.t     # descriptor and resource-limit checks
+perl test/run-action.t     # deadline, cleanup and output-limit checks
 ```
 
 The fixtures under `test/fixtures/` were captured from a real Omarchy machine
@@ -274,6 +319,7 @@ Model.js                           parsing and formatting, no Qt
 FirewallIcon.qml                   the shield
 assets/logo-mark.svg               the same shield, as the project mark
 scripts/read-state.pl              bounded unprivileged state reader
+scripts/run-action.pl              unprivileged action lifecycle supervisor
 test/                              node and Perl tests plus fixtures
 ```
 
@@ -282,6 +328,7 @@ test/                              node and Perl tests plus fixtures
 - Omarchy 4.x (`omarchy-shell` with the plugin registry)
 - `ufw`
 - `perl` (already required by Omarchy)
+- GNU coreutils (`timeout`, part of the base Omarchy system)
 - `polkit` with the Omarchy agent (`omarchy.polkit`, on by default) and the
   account in an administrator group (`wheel`)
 

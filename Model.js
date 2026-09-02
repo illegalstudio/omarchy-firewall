@@ -21,6 +21,8 @@
 
 var ANYWHERE_V4 = "0.0.0.0/0"
 var ANYWHERE_V6 = "::/0"
+var MAX_RULES_PER_FAMILY = 512
+var MAX_RENDERED_ROWS = 512
 
 function isAnywhere(address) {
   return address === ANYWHERE_V4 || address === ANYWHERE_V6 || address === "any" || address === ""
@@ -84,7 +86,13 @@ function parseRules(text, family) {
   var lines = String(text || "").split("\n")
   for (var i = 0; i < lines.length; i++) {
     var rule = parseTuple(lines[i], family)
-    if (rule) rules.push(rule)
+    if (rule) {
+      if (rules.length >= MAX_RULES_PER_FAMILY) {
+        throw new Error("Rule count exceeds the safety limit of " + MAX_RULES_PER_FAMILY
+          + " per address family")
+      }
+      rules.push(rule)
+    }
   }
   return rules
 }
@@ -274,6 +282,11 @@ function buildRows(rules4, rules6) {
   var byKey = {}
   var all = [].concat(rules4 || [], rules6 || [])
 
+  if ((rules4 || []).length > MAX_RULES_PER_FAMILY
+      || (rules6 || []).length > MAX_RULES_PER_FAMILY) {
+    throw new Error("Rule count exceeds the per-family safety limit")
+  }
+
   for (var i = 0; i < all.length; i++) {
     var rule = all[i]
     var key = rowKey(rule)
@@ -287,6 +300,10 @@ function buildRows(rules4, rules6) {
       continue
     }
     var tokens = ruleSpecTokens(rule)
+    if (rows.length >= MAX_RENDERED_ROWS) {
+      throw new Error("Rendered row count exceeds the safety limit of "
+        + MAX_RENDERED_ROWS)
+    }
     byKey[key] = rows.length
     rows.push({
       rule: rule,
@@ -305,6 +322,118 @@ function buildRows(rules4, rules6) {
   }
 
   return rows
+}
+
+// ----------------------------------------------------- action reconciliation
+
+function combineActionErrors(primary, verification) {
+  var first = String(primary || "").trim()
+  var second = String(verification || "").trim()
+  if (first === "") return second
+  if (second === "") return first
+  return first + ". Verification also failed: " + second
+}
+
+function generationFinished(revisions) {
+  var value = revisions || {}
+  return Number(value.targetState || 0) > 0
+    && Number(value.targetUnit || 0) > 0
+    && Number(value.state || 0) >= Number(value.targetState)
+    && Number(value.unit || 0) >= Number(value.targetUnit)
+}
+
+function generationSucceeded(revisions) {
+  var value = revisions || {}
+  return generationFinished(value)
+    && Number(value.stateSuccess || 0) >= Number(value.targetState)
+    && Number(value.unitSuccess || 0) >= Number(value.targetUnit)
+}
+
+function evaluateReconciliation(kind, outcome, snapshot, expectation) {
+  var actionKind = String(kind || "change")
+  var result = outcome || { ok: false, error: "Unknown firewall result" }
+  var state = snapshot || {}
+  var expected = expectation || {}
+  var fresh = state.fresh === true
+  var lifecycleKnown = typeof state.configEnabled === "boolean"
+    && typeof state.serviceActive === "boolean"
+  var inactive = fresh && lifecycleKnown
+    && state.configEnabled === false && state.serviceActive === false
+  var recovery = actionKind === "enable" && !inactive
+  var clearRecovery = (actionKind === "disable" || actionKind === "recovery") && inactive
+
+  if (!fresh || !lifecycleKnown) {
+    var verificationError = String(state.error || (!lifecycleKnown
+      ? "The resulting firewall lifecycle is incomplete"
+      : "Could not verify the resulting firewall state"))
+    return {
+      ok: false,
+      error: combineActionErrors(result.error, verificationError),
+      recovery: recovery,
+      clearRecovery: false
+    }
+  }
+
+  if (result.ok !== true) {
+    return {
+      ok: false,
+      error: String(result.error || "The firewall command did not complete")
+        + ". A fresh firewall snapshot was loaded.",
+      recovery: recovery,
+      clearRecovery: clearRecovery
+    }
+  }
+
+  if (actionKind === "enable" && state.active !== true) {
+    return {
+      ok: false,
+      error: "Enable returned successfully, but the firewall is not fully active",
+      recovery: recovery,
+      clearRecovery: false
+    }
+  }
+
+  if ((actionKind === "disable" || actionKind === "recovery") && !inactive) {
+    return {
+      ok: false,
+      error: "Disable returned successfully, but the firewall is not fully inactive",
+      recovery: false,
+      clearRecovery: false
+    }
+  }
+
+  if (actionKind === "add" || actionKind === "delete" || actionKind === "reload") {
+    var expectedLifecycleKnown = typeof expected.beforeConfigEnabled === "boolean"
+      && typeof expected.beforeServiceActive === "boolean"
+    var lifecycleChanged = !expectedLifecycleKnown
+      || state.configEnabled !== expected.beforeConfigEnabled
+      || state.serviceActive !== expected.beforeServiceActive
+    if (lifecycleChanged) {
+      return {
+        ok: false,
+        error: "The command returned successfully, but firewall activation state changed unexpectedly",
+        recovery: false,
+        clearRecovery: false
+      }
+    }
+  }
+
+  if (actionKind === "add" || actionKind === "delete") {
+    var beforeDigest = String(expected.beforeRulesDigest || "")
+    var afterDigest = String(state.rulesDigest || "")
+    if (beforeDigest === "" || afterDigest === "" || beforeDigest === afterDigest) {
+      return {
+        ok: false,
+        error: actionKind === "add"
+          ? "Add returned successfully, but the persisted rule set did not change"
+          : "Delete returned successfully, but the persisted rule set did not change",
+        recovery: false,
+        clearRecovery: false
+      }
+    }
+  }
+
+  return { ok: true, error: "", recovery: false, clearRecovery: clearRecovery }
 }
 
 function familyLabel(families) {
@@ -353,10 +482,10 @@ function parseAppProfiles(text) {
 
 // ------------------------------------------------------------- input parsing
 //
-// The unprivileged mirror of the helper's validator, so a typo gets an inline
-// message instead of a password prompt followed by an error. The helper
-// re-validates everything as root and is the authority; this is a convenience,
-// never what makes a command safe.
+// The UI-side mirror of the supervisor's validator, so a typo gets an inline
+// message instead of a password prompt followed by an error. The unprivileged
+// supervisor parses the closed grammar again before it constructs the fixed
+// pkexec, timeout and ufw argv.
 
 var ACTIONS = { allow: true, deny: true, reject: true, limit: true }
 
@@ -423,7 +552,7 @@ function isAddress(value) {
 // returns a NEW array built from what it recognised. What reaches ufw is that
 // array, never the caller's, so a token the walker does not understand cannot
 // reach the command line by being passed through untouched. No shell is
-// involved anywhere on the path either — the command is handed to the process
+// involved anywhere on the path either, the command is handed to the process
 // as an argv array.
 //
 // options.allowUnlistedProfile accepts a profile-shaped token that is not in
@@ -447,11 +576,13 @@ function walkSpec(spec, appProfiles, options) {
   if (i >= n) return fail("Incomplete rule")
 
   if (tokens[i] === "proto" || tokens[i] === "from" || tokens[i] === "to") {
+    var hasProtocol = false
     if (tokens[i] === "proto") {
       i++
       if (i >= n) return fail("proto needs tcp or udp")
       if (tokens[i] !== "tcp" && tokens[i] !== "udp") return fail("Protocol must be tcp or udp")
       out.push("proto", tokens[i++])
+      hasProtocol = true
     }
 
     var endpoints = 0
@@ -466,6 +597,9 @@ function walkSpec(spec, appProfiles, options) {
           i++
           if (i >= n) return fail("port needs a value")
           if (!isPortSpec(tokens[i])) return fail("Not a port: " + tokens[i])
+          if (tokens[i].indexOf(":") !== -1 && !hasProtocol) {
+            return fail("A port range needs TCP or UDP")
+          }
           out.push("port", tokens[i++])
         }
         endpoints = 1
@@ -483,6 +617,9 @@ function walkSpec(spec, appProfiles, options) {
     var portMatch = String(tokens[i]).match(/^([0-9]+(?::[0-9]+)?)(?:\/(tcp|udp))?$/)
     if (portMatch) {
       if (!isPortSpec(portMatch[1])) return fail("Not a port: " + portMatch[1])
+      if (portMatch[1].indexOf(":") !== -1 && !portMatch[2]) {
+        return fail("A port range needs TCP or UDP")
+      }
       out.push(tokens[i++])
     } else {
       var limit = n
@@ -546,7 +683,7 @@ function parseRuleInput(text, appProfiles) {
 // password has been typed.
 //
 // The result goes through walkSpec like everything else, so the form is not a
-// second way into ufw's argv — it is another producer of tokens for the one
+// second way into ufw's argv, it is another producer of tokens for the one
 // checkpoint.
 
 function buildRuleTokens(form, appProfiles) {
@@ -648,6 +785,12 @@ if (typeof module !== "undefined") {
     parseRuleInput: parseRuleInput,
     validateSpecTokens: validateSpecTokens,
     buildRuleTokens: buildRuleTokens,
-    previewCommand: previewCommand
+    previewCommand: previewCommand,
+    combineActionErrors: combineActionErrors,
+    generationFinished: generationFinished,
+    generationSucceeded: generationSucceeded,
+    evaluateReconciliation: evaluateReconciliation,
+    MAX_RULES_PER_FAMILY: MAX_RULES_PER_FAMILY,
+    MAX_RENDERED_ROWS: MAX_RENDERED_ROWS
   }
 }

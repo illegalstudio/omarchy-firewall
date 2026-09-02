@@ -36,8 +36,11 @@ Panel {
   property int formIndex: 0
 
   property var pendingDelete: null
+  property bool confirmEnableOpen: false
   property bool confirmDisableOpen: false
-  readonly property bool confirmOpen: pendingDelete !== null || confirmDisableOpen
+  property bool disableIsRecovery: false
+  readonly property bool confirmOpen: pendingDelete !== null || confirmEnableOpen
+    || confirmDisableOpen
 
   // ---- form state
   property string fmAction: "allow"
@@ -281,24 +284,39 @@ Panel {
 
   function requireManage() {
     if (firewall.canManage) return true
-    firewall.lastError = "ufw is not installed."
+    firewall.lastError = firewall.manageError
     return false
   }
 
   // Disabling asks twice on purpose. The polkit dialog that follows says only
-  // that a program is being run as root — it cannot say which one or why — so
+  // that a program is being run as root, it cannot say which one or why, so
   // the question of whether to take the firewall down is put here, where it can
   // name what it means.
   function requestToggle() {
-    if (!firewall.installed || firewall.busy) return
+    if (firewall.busy) return
     if (!requireManage()) return
+    disableIsRecovery = false
     if (firewall.configEnabled) confirmDisableOpen = true
-    else firewall.setEnabled(true)
+    else confirmEnableOpen = true
+  }
+
+  function confirmEnable() {
+    confirmEnableOpen = false
+    firewall.setEnabled(true)
   }
 
   function confirmDisable() {
+    var recovery = disableIsRecovery
     confirmDisableOpen = false
-    firewall.setEnabled(false)
+    disableIsRecovery = false
+    if (recovery) firewall.emergencyDisable()
+    else firewall.setEnabled(false)
+  }
+
+  function requestEmergencyDisable() {
+    if (!firewall.canEmergencyDisable || firewall.busy) return
+    disableIsRecovery = true
+    confirmDisableOpen = true
   }
 
   function requestDelete(row) {
@@ -381,14 +399,18 @@ Panel {
     ruleIndex = 0
     formIndex = 0
     pendingDelete = null
+    confirmEnableOpen = false
     confirmDisableOpen = false
+    disableIsRecovery = false
     firewall.lastError = ""
     if (panelFlick) panelFlick.contentY = 0
     firewall.refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   } else {
     pendingDelete = null
+    confirmEnableOpen = false
     confirmDisableOpen = false
+    disableIsRecovery = false
     mode = "list"
   }
 
@@ -441,7 +463,7 @@ Panel {
     }
     // Left click opens the panel; right click only re-reads state. Toggling the
     // firewall from a bar click is one slip away from taking it down, and the
-    // password prompt that follows cannot say what it is for — so the toggle
+    // password prompt that follows cannot say what it is for, so the toggle
     // lives in the panel, next to the rules it affects.
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) firewall.refresh()
@@ -468,6 +490,10 @@ Panel {
       Keys.onPressed: function(event) {
         if (root.pendingDelete !== null) {
           if (deleteConfirm.handleKey(event)) event.accepted = true
+          return
+        }
+        if (root.confirmEnableOpen) {
+          if (enableConfirm.handleKey(event)) event.accepted = true
           return
         }
         if (root.confirmDisableOpen) {
@@ -573,6 +599,8 @@ Panel {
                   ToggleSwitch {
                     id: powerSwitch
                     visible: firewall.installed && root.mode === "list"
+                    enabled: firewall.canManage && !firewall.busy
+                    opacity: enabled ? 1.0 : 0.5
                     checked: firewall.configEnabled
                     busy: firewall.busy
                     hasCursor: header.ringVisible
@@ -582,7 +610,9 @@ Panel {
 
                     PanelToolTip {
                       visible: powerSwitch.containsMouse
-                      text: firewall.configEnabled ? "Disable the firewall" : "Enable the firewall"
+                      text: firewall.canManage
+                        ? (firewall.configEnabled ? "Disable the firewall" : "Enable the firewall")
+                        : firewall.manageError
                       fontFamily: hero.fontFamily
                     }
                   }
@@ -602,10 +632,45 @@ Panel {
             }
 
             Notice {
-              visible: !firewall.installed
+              visible: firewall.loaded && !firewall.installed
               width: parent.width
               tone: root.urgent
               text: "ufw is not installed on this machine."
+            }
+
+            Notice {
+              visible: firewall.loaded && firewall.installed && !firewall.actionToolsReady
+              width: parent.width
+              tone: root.urgent
+              text: firewall.actionToolsError !== ""
+                ? firewall.actionToolsError : "Required firewall executables are not trusted."
+            }
+
+            Column {
+              visible: firewall.recoveryRecommended
+              width: parent.width
+              spacing: Style.space(8)
+
+              Notice {
+                width: parent.width
+                tone: root.urgent
+                text: firewall.enableRecoveryAvailable
+                  ? "The last enable was not verified as inactive. Emergency disable restores the verified inactive starting state."
+                  : (firewall.inconsistent
+                    ? "The configuration and service disagree. Normal changes are blocked; emergency disable brings both back to inactive."
+                    : "Firewall state cannot be verified. Normal changes are blocked; emergency disable is the recovery path.")
+              }
+
+              Button {
+                text: "Emergency disable"
+                bordered: true
+                focusable: false
+                enabled: firewall.canEmergencyDisable
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                onClicked: root.requestEmergencyDisable()
+              }
             }
 
             Text {
@@ -689,8 +754,9 @@ Panel {
 
                 MouseArea {
                   anchors.fill: parent
+                  enabled: firewall.canManage && !firewall.busy
                   hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
+                  cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                   onEntered: { root.cursorActive = true; root.focusSection = "add" }
                   onClicked: root.openAdd()
                 }
@@ -702,7 +768,7 @@ Panel {
                   anchors.leftMargin: Style.space(10)
                   anchors.verticalCenter: parent.verticalCenter
                   text: "+  Add rule"
-                  color: root.foreground
+                  color: firewall.canManage ? root.foreground : root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                 }
@@ -973,7 +1039,7 @@ Panel {
                     text: "Add rule"
                     bordered: true
                     focusable: false
-                    enabled: root.formResult.ok && !firewall.busy
+                    enabled: root.formResult.ok && firewall.canManage && !firewall.busy
                     foreground: root.foreground
                     fontFamily: root.fontFamily
                     fontSize: Style.font.bodySmall
@@ -1026,15 +1092,33 @@ Panel {
       }
 
       ConfirmDialog {
+        id: enableConfirm
+        anchors.fill: parent
+        z: 20
+        opened: root.confirmEnableOpen
+        message: "Turn the firewall on?\n\nUFW warns that enabling may disrupt existing SSH and remote connections. Continue only if this machine remains reachable or the required SSH allow rule is already present.\n\nImmediately before approval, the panel verifies that the starting state is fully inactive. After the command, it reads the real state again before allowing another change. If access is lost, use a local console and run sudo ufw disable."
+        confirmText: "Enable firewall"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onCanceled: root.confirmEnableOpen = false
+        onConfirmed: root.confirmEnable()
+      }
+
+      ConfirmDialog {
         id: disableConfirm
         anchors.fill: parent
         z: 20
         opened: root.confirmDisableOpen
-        message: "Turn the firewall off?\nEvery rule below stops applying until it is turned back on."
-        confirmText: "Turn off"
+        message: root.disableIsRecovery
+          ? "Emergency disable the firewall?\n\nThis runs ufw disable even when the current state cannot be trusted, then requires a fresh configuration and service snapshot. It reduces protection and needs a separate password confirmation."
+          : "Turn the firewall off?\nEvery rule below stops applying until it is turned back on."
+        confirmText: root.disableIsRecovery ? "Emergency disable" : "Turn off"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        onCanceled: root.confirmDisableOpen = false
+        onCanceled: {
+          root.confirmDisableOpen = false
+          root.disableIsRecovery = false
+        }
         onConfirmed: root.confirmDisable()
       }
     }

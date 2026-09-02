@@ -35,6 +35,20 @@ function checkTrue(label, value) {
   check(label, value === true, true)
 }
 
+function checkThrows(label, action, pattern) {
+  checks++
+  try {
+    action()
+    failures++
+    console.log("FAIL  " + label + "\n        did not throw")
+  } catch (error) {
+    if (!pattern.test(String(error && error.message ? error.message : error))) {
+      failures++
+      console.log("FAIL  " + label + "\n        unexpected error " + String(error))
+    }
+  }
+}
+
 // ------------------------------------------------------------------ ufw.conf
 
 var conf = Model.parseUfwConf(read("ufw.conf"))
@@ -148,6 +162,126 @@ checkTrue("every row renders an action", rows.every(function (row) {
 checkTrue("no row is both deletable and unexplained", rows.every(function (row) {
   return row.deletable ? row.readOnlyReason === "" : row.readOnlyReason !== ""
 }))
+
+var tupleLine = "### tuple ### allow tcp 443 0.0.0.0/0 any 0.0.0.0/0 in"
+var tooManyTupleLines = new Array(Model.MAX_RULES_PER_FAMILY + 2).join(tupleLine + "\n")
+checkThrows("tuple parser rejects excessive rule cardinality", function () {
+  Model.parseRules(tooManyTupleLines, 4)
+}, /Rule count exceeds/)
+
+var tooManyRows4 = []
+var tooManyRows6 = []
+for (var rowIndex = 0; rowIndex < Model.MAX_RENDERED_ROWS + 1; rowIndex++) {
+  var targetRows = rowIndex % 2 === 0 ? tooManyRows4 : tooManyRows6
+  targetRows.push(Model.parseTuple(
+    "### tuple ### allow tcp " + (1000 + rowIndex)
+      + " 10.0.0." + (rowIndex % 255) + " any 0.0.0.0/0 in",
+    rowIndex % 2 === 0 ? 4 : 6))
+}
+checkThrows("row builder rejects excessive delegate cardinality", function () {
+  Model.buildRows(tooManyRows4, tooManyRows6)
+}, /Rendered row count exceeds/)
+
+check("simple range without protocol is rejected",
+  Model.parseRuleInput("allow 8000:8010", []).ok, false)
+check("structured range without protocol is rejected",
+  Model.parseRuleInput("allow from any to any port 8000:8010", []).ok, false)
+
+// --------------------------------------------------- action reconciliation
+
+checkTrue("target generation completes only when both readers finish",
+  Model.generationFinished({ state: 4, unit: 7, targetState: 4, targetUnit: 7 }))
+check("partial target generation is not complete",
+  Model.generationFinished({ state: 4, unit: 6, targetState: 4, targetUnit: 7 }), false)
+check("stale successful revisions cannot satisfy a newer generation",
+  Model.generationSucceeded({
+    state: 5,
+    unit: 8,
+    stateSuccess: 4,
+    unitSuccess: 8,
+    targetState: 5,
+    targetUnit: 8
+  }), false)
+checkTrue("matching successful revisions prove a fresh generation",
+  Model.generationSucceeded({
+    state: 5,
+    unit: 8,
+    stateSuccess: 5,
+    unitSuccess: 8,
+    targetState: 5,
+    targetUnit: 8
+  }))
+
+var inactiveSnapshot = {
+  fresh: true,
+  active: false,
+  configEnabled: false,
+  serviceActive: false,
+  rulesDigest: "after"
+}
+var activeSnapshot = {
+  fresh: true,
+  active: true,
+  configEnabled: true,
+  serviceActive: true,
+  rulesDigest: "after"
+}
+
+checkTrue("verified enable succeeds",
+  Model.evaluateReconciliation("enable", { ok: true }, activeSnapshot, {}).ok)
+check("enable with unknown state fails closed",
+  Model.evaluateReconciliation("enable", { ok: true }, {
+    fresh: false,
+    error: "snapshot timed out"
+  }, {}).ok, false)
+checkTrue("unknown enable result exposes recovery",
+  Model.evaluateReconciliation("enable", { ok: false, error: "command timed out" }, {
+    fresh: false,
+    error: "snapshot timed out"
+  }, {}).recovery)
+checkTrue("verification error preserves the action error",
+  /command timed out/.test(Model.evaluateReconciliation("enable", {
+    ok: false,
+    error: "command timed out"
+  }, { fresh: false, error: "snapshot timed out" }, {}).error))
+check("verified inactive failed enable needs no recovery",
+  Model.evaluateReconciliation("enable", { ok: false, error: "cancelled" },
+    inactiveSnapshot, {}).recovery, false)
+checkTrue("verified emergency disable clears recovery",
+  Model.evaluateReconciliation("recovery", { ok: true }, inactiveSnapshot, {}).clearRecovery)
+check("add without persisted rule change fails",
+  Model.evaluateReconciliation("add", { ok: true }, {
+    fresh: true,
+    configEnabled: false,
+    serviceActive: false,
+    rulesDigest: "same"
+  }, {
+    beforeRulesDigest: "same",
+    beforeConfigEnabled: false,
+    beforeServiceActive: false
+  }).ok, false)
+checkTrue("add with persisted rule change succeeds",
+  Model.evaluateReconciliation("add", { ok: true }, {
+    fresh: true,
+    configEnabled: false,
+    serviceActive: false,
+    rulesDigest: "after"
+  }, {
+    beforeRulesDigest: "before",
+    beforeConfigEnabled: false,
+    beforeServiceActive: false
+  }).ok)
+check("rule action rejects an unexpected activation change",
+  Model.evaluateReconciliation("delete", { ok: true }, activeSnapshot, {
+    beforeRulesDigest: "before",
+    beforeConfigEnabled: false,
+    beforeServiceActive: false
+  }).ok, false)
+checkTrue("reload accepts an unchanged verified lifecycle",
+  Model.evaluateReconciliation("reload", { ok: true }, activeSnapshot, {
+    beforeConfigEnabled: true,
+    beforeServiceActive: true
+  }).ok)
 
 // --------------------------------------------------------------- app profiles
 
