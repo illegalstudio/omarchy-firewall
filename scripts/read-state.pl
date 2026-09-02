@@ -167,7 +167,9 @@ sub read_profiles {
     next if $entry eq "." || $entry eq "..";
     die "Profile directory exceeds " . MAX_PROFILE_ENTRIES . " entries"
       if @entries >= MAX_PROFILE_ENTRIES;
-    push @entries, $entry;
+    my ($safe_entry) = $entry =~ /\A([^\0\/]{1,255})\z/;
+    next if !defined($safe_entry);
+    push @entries, $safe_entry;
   }
   closedir($dir_handle) or die "Cannot close $directory: $!";
 

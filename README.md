@@ -79,6 +79,11 @@ model refuses to create more than 512 rendered rule rows. Process diagnostics
 retain at most 512 characters per stream. State and service reads have 5 and 3
 second deadlines with forced cleanup after a 1 second grace period.
 
+Both bundled Perl helpers start with Quickshell `clearEnvironment: true`, a
+single fixed `LC_ALL=C` variable and Perl taint mode. Session values such as
+`PERL5OPT`, `PERL5LIB`, `PERLLIB` and `PERLIO` therefore cannot load code or
+alter interpreter startup before the reviewed scripts run.
+
 The panel refreshes this bounded snapshot every 30 seconds by default, after
 each firewall action, and whenever the user requests a refresh. Reading never
 asks for a password.
@@ -102,7 +107,11 @@ group after 45 seconds and KILL after a further 5 seconds. An independent QML
 guard stops the unprivileged supervisor after the combined 150 second bound and
 a 5 second grace. The supervisor retains at most 4096 bytes from each privileged
 output stream. On overflow it closes the producer pipes, requests termination
-and reports failure instead of silently discarding output.
+and reports failure instead of silently discarding output. Reaping the direct
+child and closing its streams is not considered completion while another
+member remains in the original process group. The supervisor continues through
+TERM and KILL, probes the group without signalling it and returns only after
+the group is proven empty.
 
 - **The password dialog is Omarchy's own.** pkexec hands authentication to
   polkit, which hands it to the agent running inside `omarchy-shell`

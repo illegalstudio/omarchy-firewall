@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Encode qw(decode FB_DEFAULT);
-use Errno qw(EACCES EAGAIN ECHILD EINTR ESRCH EWOULDBLOCK);
+use Errno qw(EACCES EAGAIN ECHILD EINTR EPERM ESRCH EWOULDBLOCK);
 use Fcntl qw(FD_CLOEXEC F_GETFL F_SETFD O_NONBLOCK S_ISDIR S_ISREG);
 use IO::Select ();
 use JSON::PP ();
@@ -157,9 +157,10 @@ sub validate_ufw_args {
     my $value = "$arg";
     die "Ufw argument exceeds " . MAX_ARGUMENT_BYTES . " bytes"
       if length($value) > MAX_ARGUMENT_BYTES;
+    my ($safe_value) = $value =~ /\A([\x20-\x7e]*)\z/;
     die "Ufw argument contains a control or non-ASCII character"
-      if $value =~ /[^\x20-\x7e]/;
-    push @input, $value;
+      if !defined($safe_value);
+    push @input, $safe_value;
   }
 
   return [@input] if @input == 2 && $input[0] eq "--force" && $input[1] eq "enable";
@@ -232,8 +233,19 @@ sub _set_nonblocking {
 
 sub _signal_group {
   my ($signal, $pid) = @_;
-  my $sent = kill($signal, -$pid);
-  kill($signal, $pid) if !$sent;
+  kill($signal, -$pid);
+}
+
+sub _process_group_exists {
+  my ($pid) = @_;
+  local $! = 0;
+  my $visible = kill(0, -$pid);
+  return 1 if $visible > 0 || $!{EPERM};
+  return 0 if $!{ESRCH};
+
+  # Any other result is not proof that the group is gone. Fail closed and keep
+  # supervising until a later probe can prove extinction.
+  return 1;
 }
 
 sub _append_bounded {
@@ -333,6 +345,7 @@ sub run_supervised {
   my $runtime_error = "";
   my $child_done = 0;
   my $wait_status = 0;
+  my $forced_cleanup = 0;
 
   while (1) {
     my $now = clock_gettime(CLOCK_MONOTONIC);
@@ -410,7 +423,18 @@ sub run_supervised {
         $child_done = 1;
       }
     }
-    last if $child_done && $selector->count == 0;
+    if ($child_done && $selector->count == 0) {
+      last if !_process_group_exists($pid);
+      if (!defined($term_at)) {
+        # A descendant outlived the direct child and may have closed both
+        # inherited streams. Treat that as an abnormal result, then keep the
+        # original process group under TERM/KILL supervision until kill(0)
+        # proves that no member remains.
+        $forced_cleanup = 1;
+        $term_at = $now;
+        _signal_group("TERM", $pid);
+      }
+    }
   }
 
   die $runtime_error if $runtime_error ne "";
@@ -423,6 +447,7 @@ sub run_supervised {
     signal      => $signal,
     timedOut    => $timed_out ? JSON::PP::true : JSON::PP::false,
     interrupted => $interrupted ? JSON::PP::true : JSON::PP::false,
+    forcedCleanup => $forced_cleanup ? JSON::PP::true : JSON::PP::false,
     overflow    => ($stdout_overflow || $stderr_overflow)
       ? JSON::PP::true : JSON::PP::false,
     stdout      => decode("UTF-8", $stdout, FB_DEFAULT),

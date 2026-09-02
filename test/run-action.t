@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use File::Spec ();
+use File::Temp qw(tempdir);
 use FindBin ();
 use IO::Select ();
 use JSON::PP ();
@@ -17,6 +18,27 @@ my $supervisor = File::Spec->catfile(
   "run-action.pl",
 );
 do $supervisor or die "Cannot load $supervisor: $@ $!";
+
+my $service_path = File::Spec->catfile($FindBin::Bin, "..", "Service.qml");
+open(my $service_handle, "<", $service_path)
+  or die "Cannot read $service_path: $!";
+my $service_source;
+{
+  local $/;
+  $service_source = <$service_handle>;
+}
+close($service_handle);
+
+my @cleared_environments = $service_source =~ /clearEnvironment:\s*true/g;
+is(scalar(@cleared_environments), 2,
+  "both bundled Perl helpers clear the inherited environment");
+my @minimal_environments = $service_source
+  =~ /environment:\s*\(\{\s*LC_ALL:\s*"C"\s*\}\)/g;
+is(scalar(@minimal_environments), 2,
+  "both bundled Perl helpers receive only the fixed locale");
+my @taint_invocations = $service_source =~ /"\/usr\/bin\/perl",\s*"-T"/g;
+is(scalar(@taint_invocations), 2,
+  "both bundled Perl helpers start in taint mode");
 
 sub wait_for_process_stop {
   my ($pid) = @_;
@@ -97,6 +119,45 @@ is($success->{stdout}, "action-ok", "stdout is captured");
 like($success->{stderr}, qr/action-note/, "stderr is captured");
 ok(!$success->{overflow}, "small output does not overflow");
 
+my $ambient_library = tempdir(CLEANUP => 1);
+open(my $ambient_module, ">", File::Spec->catfile($ambient_library, "AmbientStartup.pm"))
+  or die "Cannot create ambient Perl module: $!";
+print {$ambient_module} "package AmbientStartup; BEGIN { die qq(ambient module loaded\\n) } 1;\n";
+close($ambient_module);
+my $taint_startup;
+{
+  local $ENV{PERL5LIB} = $ambient_library;
+  local $ENV{PERL5OPT} = "-MAmbientStartup";
+  $taint_startup = run_supervised([
+    "/usr/bin/perl",
+    "-T",
+    "-e",
+    "print qq(clean-startup);",
+  ]);
+}
+is($taint_startup->{exitCode}, 0,
+  "taint startup ignores ambient Perl module controls");
+is($taint_startup->{stdout}, "clean-startup",
+  "ambient Perl modules cannot run before the script");
+
+die "Unexpected test path" if $supervisor =~ /\}/;
+my $taint_validator_program = 'do q{' . $supervisor
+  . '}; my $safe = validate_ufw_args(\@ARGV);'
+  . ' exec {q{/usr/bin/true}} q{/usr/bin/true}, @{$safe};';
+my $taint_validator;
+{
+  local %ENV = (LC_ALL => "C");
+  $taint_validator = run_supervised([
+    "/usr/bin/perl",
+    "-T",
+    "-e",
+    $taint_validator_program,
+    "disable",
+  ]);
+}
+is($taint_validator->{exitCode}, 0,
+  "validated tainted argv is rebuilt safely for list-form exec");
+
 my $overflow = run_supervised([
   $^X,
   "-e",
@@ -116,6 +177,22 @@ my $endless_output = run_supervised([
 ], { timeout => 2, grace => 0.05, stream_limit => 64 });
 ok($endless_output->{overflow}, "producer overflow is reported");
 cmp_ok(time() - $overflow_started, "<", 1, "overflow stops the producer promptly");
+
+my $overflow_tree = run_supervised([
+  $^X,
+  "-e",
+  '$SIG{PIPE} = "IGNORE"; $| = 1; my $child = fork();'
+    . ' die "fork failed" if !defined($child);'
+    . ' if ($child == 0) { $SIG{TERM} = "IGNORE"; close(STDOUT); close(STDERR);'
+    . ' select(undef, undef, undef, 5); exit 0; }'
+    . ' print "$child\\n"; select(undef, undef, undef, 0.05);'
+    . ' print "z" x 4096; select(undef, undef, undef, 5);',
+], { timeout => 2, grace => 0.1, stream_limit => 64 });
+my ($overflow_descendant) = $overflow_tree->{stdout} =~ /([0-9]+)/;
+ok($overflow_tree->{overflow}, "descendant regression reaches the output limit");
+ok($overflow_descendant, "overflow regression captures the closed-stream descendant");
+ok(wait_for_process_stop($overflow_descendant),
+  "supervisor proves the TERM-ignoring descendant is gone before returning");
 
 my $started = time();
 my $timed_out = run_supervised([

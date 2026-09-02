@@ -294,6 +294,9 @@ Item {
     if (payload.interrupted === true) {
       return { ok: false, error: "Firewall command supervision was interrupted" }
     }
+    if (payload.forcedCleanup === true) {
+      return { ok: false, error: "Firewall command left a process behind and was terminated" }
+    }
     if (Number(payload.signal || 0) !== 0) {
       return { ok: false, error: "Firewall command stopped on signal " + Number(payload.signal) }
     }
@@ -471,7 +474,7 @@ Item {
       beforeConfigEnabled: configEnabled,
       beforeServiceActive: serviceActive
     }
-    actionProcess.command = ["/usr/bin/perl", actionSupervisorPath].concat(args)
+    actionProcess.command = ["/usr/bin/perl", "-T", actionSupervisorPath].concat(args)
     actionProcess.running = true
     return true
   }
@@ -590,8 +593,10 @@ Item {
   Process {
     id: stateProcess
     running: true
+    clearEnvironment: true
+    environment: ({ LC_ALL: "C" })
     command: [root.timeoutPath, "--signal=TERM", "--kill-after=1s", "5s",
-      "/usr/bin/perl", root.stateReaderPath]
+      "/usr/bin/perl", "-T", root.stateReaderPath]
     stdout: SplitParser {
       splitMarker: ""
       onRead: function(data) { root._appendStateOutput(data, false) }
@@ -642,6 +647,8 @@ Item {
   Process {
     id: actionProcess
     running: false
+    clearEnvironment: true
+    environment: ({ LC_ALL: "C" })
     command: []
     stdout: SplitParser {
       splitMarker: ""

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "illegalstudio.omarchy-firewall",
   "name": "Firewall",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "illegalstudio",
   "license": "MIT",
   "description": "ufw status and rules in the Omarchy bar. Reads unprivileged; every change goes through the Omarchy password prompt.",
