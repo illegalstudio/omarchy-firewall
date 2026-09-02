@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "." as Local
 import "Model.js" as Model
 
 // Bar button plus popup panel.
@@ -558,6 +559,31 @@ Panel {
           interactive: contentHeight > height
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+          WheelHandler {
+            target: null
+            blocking: true
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+            onWheel: function(event) {
+              var minimumY = panelFlick.originY !== undefined
+                ? panelFlick.originY : 0
+              var maximumY = minimumY + panelFlick.contentHeight
+                - panelFlick.height
+
+              if (maximumY <= minimumY) return
+
+              panelFlick.contentY = Math.max(
+                minimumY,
+                Math.min(
+                  panelFlick.contentY - event.angleDelta.y,
+                  maximumY
+                )
+              )
+
+              event.accepted = true
+            }
+          }
+
           Column {
             id: column
             width: panelFlick.width
@@ -919,7 +945,7 @@ Panel {
                     Keys.onEscapePressed: keyCatcher.forceActiveFocus()
                   }
 
-                  Dropdown {
+                  Local.Dropdown {
                     id: appDropdown
                     visible: root.fmKind === "app"
                     width: Style.space(220)

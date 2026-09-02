@@ -379,6 +379,52 @@ check("actions are the four ufw verbs",
 accepts("allow Web Server", "allow", ["Web Server"])
 accepts("allow Web Server comment lab box", "allow", ["Web Server", "comment", "lab box"])
 
+// --------------------------------------------------------------- scrolling
+
+var panelQml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+var dropdownQml = fs.readFileSync(path.join(__dirname, "..", "Dropdown.qml"), "utf8")
+var scrollQml = panelQml + "\n" + dropdownQml
+
+function wheelHandlerIsDirect(source, scrollId) {
+  var expected = new RegExp(
+    "WheelHandler\\s*\\{" +
+      "[\\s\\S]*?target\\s*:\\s*null" +
+      "[\\s\\S]*?blocking\\s*:\\s*true" +
+      "[\\s\\S]*?acceptedDevices\\s*:\\s*PointerDevice\\.Mouse\\s*\\|\\s*PointerDevice\\.TouchPad" +
+      "[\\s\\S]*?" + scrollId + "\\.contentY\\s*-\\s*event\\.angleDelta\\.y" +
+      "[\\s\\S]*?event\\.accepted\\s*=\\s*true")
+  return expected.test(source)
+}
+
+checkTrue("main Flickable handles mouse and touchpad wheel events directly",
+  wheelHandlerIsDirect(panelQml, "panelFlick"))
+checkTrue("dropdown ListView handles mouse and touchpad wheel events directly",
+  wheelHandlerIsDirect(dropdownQml, "optionList"))
+check("one WheelHandler exists for each local scrollable container",
+  (scrollQml.match(/WheelHandler\s*\{/g) || []).length, 2)
+check("each handler uses angleDelta exactly once",
+  (scrollQml.match(/event\.angleDelta\.y/g) || []).length, 2)
+check("pixelDelta is not used", scrollQml.indexOf("pixelDelta"), -1)
+checkTrue("wheel delta is not multiplied or divided",
+  !/event\.angleDelta\.y\s*[*\/]|[*\/]\s*event\.angleDelta\.y/.test(scrollQml))
+checkTrue("scroll position has no animation",
+  !/(?:NumberAnimation|SmoothedAnimation|Behavior\s+on\s+contentY)/.test(scrollQml))
+checkTrue("the panel explicitly selects the local dropdown",
+  /Local\.Dropdown\s*\{[\s\S]*?id:\s*appDropdown/.test(panelQml))
+
+var dropdownApi = [
+  "property string label", "property string value", "property var options",
+  "property color foreground", "property color background",
+  "property color popupBorder", "property color accent",
+  "property string fontFamily", "property int rowHeight",
+  "property int popupRowHeight", "property bool showLabel",
+  "property bool hasCursor", "property bool popupOpen",
+  "function open()", "function close()", "function toggle()",
+  "signal changed(string value)", "signal hovered(bool isHovered)"
+]
+checkTrue("local dropdown preserves the standard public API",
+  dropdownApi.every(function (member) { return dropdownQml.indexOf(member) !== -1 }))
+
 // ------------------------------------------------------------------- reporting
 
 if (process.argv.indexOf("--show") !== -1) {
