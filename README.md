@@ -296,8 +296,15 @@ labelled, and deleting one says so in the confirmation.
 
 ## Development
 
-`Model.js` is plain ES5 with no Qt imports. The parser and bounded reader are
-testable without root:
+Run the complete validation and test suite with:
+
+```bash
+make check
+```
+
+This validates `manifest.json`, runs `omarchy plugin validate .`, and executes
+the JavaScript and Perl tests. `Model.js` is plain ES5 with no Qt imports. The
+individual tests remain available without root:
 
 ```bash
 node test/run.js           # assertions
@@ -316,6 +323,26 @@ automatically. If a change does not land, force it with:
 ```bash
 omarchy-shell shell rescanPlugins
 ```
+
+## Releasing
+
+Start an interactive release from a clean branch that tracks `origin`:
+
+```bash
+make release
+```
+
+The command reads local and remote tags without fetching. It proposes the next
+patch after the latest `vMAJOR.MINOR.PATCH` tag. If the repository has no such
+tag, it proposes the version already stored in `manifest.json`. Press Enter to
+accept the proposal, or enter a custom semantic version with or without the `v`
+prefix.
+
+After an explicit confirmation, the command updates `manifest.json`, runs
+`make check`, creates a `release: vX.Y.Z` commit when the version changed, and
+creates an annotated tag. It then pushes the branch and tag to `origin` in one
+atomic operation. The tag starts the release workflow, which verifies the
+manifest, reruns the tests, and creates the GitHub Release with generated notes.
 
 ## Layout
 
