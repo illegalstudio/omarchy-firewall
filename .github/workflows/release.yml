@@ -36,6 +36,8 @@ jobs:
           fi
 
       - name: Test
+        env:
+          OMARCHY_FIREWALL_SKIP_HOST_TOOL_CHECK: "1"
         run: make test
 
       - name: Publish GitHub Release

@@ -78,9 +78,13 @@ symlink($paths{conf}, $symlink) or die "Cannot create test symlink: $!";
 eval { read_bounded_file($symlink, 1024, 0) };
 like($@, qr/Cannot open/, "symbolic links are rejected");
 
-my ($tools_ready, $tools_error) = inspect_action_tools();
-ok($tools_ready, "installed action executables pass ownership checks")
-  or diag($tools_error);
+SKIP: {
+  skip "host executable check requires an Omarchy system", 1
+    if $ENV{OMARCHY_FIREWALL_SKIP_HOST_TOOL_CHECK};
+  my ($tools_ready, $tools_error) = inspect_action_tools();
+  ok($tools_ready, "installed action executables pass ownership checks")
+    or diag($tools_error);
+}
 my $tool_link = File::Spec->catfile($temporary, "ufw-link");
 symlink("/usr/bin/ufw", $tool_link) or die "Cannot create executable symlink: $!";
 my ($linked_tool_ready, $linked_tool_error) = inspect_action_tools([$tool_link]);
