@@ -84,7 +84,13 @@ like($@, qr/requires a protocol/, "structured ranges require a protocol");
 eval { validate_ufw_args(["allow", "22/tcp", "unexpected"]) };
 like($@, qr/Unexpected ufw rule argument/, "trailing arguments are rejected");
 
-my $privileged_command = build_privileged_command(["--force", "enable"]);
+my $host_check_paths = $ENV{OMARCHY_FIREWALL_SKIP_HOST_TOOL_CHECK}
+  ? [$^X, "/usr/bin/timeout"]
+  : undef;
+my $privileged_command = build_privileged_command(
+  ["--force", "enable"],
+  $host_check_paths,
+);
 is_deeply(
   $privileged_command,
   [
