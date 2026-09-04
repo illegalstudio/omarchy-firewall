@@ -324,26 +324,6 @@ automatically. If a change does not land, force it with:
 omarchy-shell shell rescanPlugins
 ```
 
-## Releasing
-
-Start an interactive release from a clean branch that tracks `origin`:
-
-```bash
-make release
-```
-
-The command reads local and remote tags without fetching. It proposes the next
-patch after the latest `vMAJOR.MINOR.PATCH` tag. If the repository has no such
-tag, it proposes the version already stored in `manifest.json`. Press Enter to
-accept the proposal, or enter a custom semantic version with or without the `v`
-prefix.
-
-After an explicit confirmation, the command updates `manifest.json`, runs
-`make check`, creates a `release: vX.Y.Z` commit when the version changed, and
-creates an annotated tag. It then pushes the branch and tag to `origin` in one
-atomic operation. The tag starts the release workflow, which verifies the
-manifest, reruns the tests, and creates the GitHub Release with generated notes.
-
 ## Layout
 
 ```
